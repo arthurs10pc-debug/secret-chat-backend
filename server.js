@@ -16,13 +16,11 @@ const io = new Server(server, {
   }
 });
 
-// MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/stealth_chat";
 mongoose.connect(MONGO_URI)
   .then(() => console.log("MongoDB Connected"))
   .catch(err => console.error("MongoDB Error:", err));
 
-// Message Schema with 7-Day TTL for non-parent if needed
 const messageSchema = new mongoose.Schema({
   room: { type: String, required: true },
   senderRole: { type: String, enum: ['parent', 'user'], default: 'user' },
@@ -36,43 +34,57 @@ const Message = mongoose.model('Message', messageSchema);
 io.on('connection', (socket) => {
   // Join Room
   socket.on('join_room', async ({ room, role }) => {
-    socket.join(room);
-    socket.room = room;
+    if (!room) return;
+    const cleanRoom = room.trim().toLowerCase();
+    
+    // Leave previous rooms
+    Array.from(socket.rooms).forEach(r => {
+      if (r !== socket.id) socket.leave(r);
+    });
+
+    socket.join(cleanRoom);
+    socket.activeRoom = cleanRoom;
     socket.role = role;
 
     try {
-      const history = await Message.find({ room }).sort({ timestamp: 1 });
+      const history = await Message.find({ room: cleanRoom }).sort({ timestamp: 1 });
       socket.emit('load_history', history);
     } catch (err) {
-      console.error(err);
+      console.error("Load history error:", err);
     }
   });
 
   // Send Encrypted Message
   socket.on('send_stealth_msg', async (data) => {
+    if (!data.room || !data.encryptedText) return;
+    const cleanRoom = data.room.trim().toLowerCase();
+
     try {
       const newMsg = new Message({
-        room: data.room,
-        senderRole: data.role,
+        room: cleanRoom,
+        senderRole: data.role || 'user',
         encryptedText: data.encryptedText,
         timestamp: new Date()
       });
       await newMsg.save();
 
-      io.to(data.room).emit('receive_stealth_msg', {
+      const payload = {
         _id: newMsg._id,
-        room: newMsg.room,
+        room: cleanRoom,
         senderRole: newMsg.senderRole,
         encryptedText: newMsg.encryptedText,
         timestamp: newMsg.timestamp,
         flaggedPending: false
-      });
+      };
+
+      // Broadcast to all sockets in that room
+      io.to(cleanRoom).emit('receive_stealth_msg', payload);
     } catch (err) {
-      console.error(err);
+      console.error("Send message error:", err);
     }
   });
 
-  // Toggle Answer Pending Flag (Parent only)
+  // Toggle Answer Pending Flag
   socket.on('toggle_pending', async ({ messageId, status }) => {
     try {
       const updated = await Message.findByIdAndUpdate(messageId, { flaggedPending: status }, { new: true });
@@ -80,16 +92,16 @@ io.on('connection', (socket) => {
         io.to(updated.room).emit('update_msg_status', { messageId, flaggedPending: status });
       }
     } catch (err) {
-      console.error(err);
+      console.error("Pending flag error:", err);
     }
   });
 
-  // Assistant Alert Sync
+  // Assistant Alert
   socket.on('send_assistant_alert', (data) => {
-    socket.to(data.room).emit('receive_assistant_alert', data);
+    if (!data.room) return;
+    const cleanRoom = data.room.trim().toLowerCase();
+    socket.to(cleanRoom).emit('receive_assistant_alert', data);
   });
-
-  socket.on('disconnect', () => {});
 });
 
 const PORT = process.env.PORT || 5000;
