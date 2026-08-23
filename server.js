@@ -54,36 +54,48 @@ io.on('connection', (socket) => {
     if (!data.room || !data.encryptedText) return;
     const cleanRoom = data.room.trim().toLowerCase();
 
-    const payload = {
-      _id: new mongoose.Types.ObjectId().toString(),
-      room: cleanRoom,
-      senderRole: data.role || 'user',
-      encryptedText: data.encryptedText,
-      timestamp: new Date(),
-      flaggedPending: false
-    };
-
-    // Instant Realtime broadcast to everyone in the room (including sender)
-    io.to(cleanRoom).emit('receive_stealth_msg', payload);
-
     try {
       const newMsg = new Message({
         room: cleanRoom,
         senderRole: data.role || 'user',
         encryptedText: data.encryptedText,
-        timestamp: payload.timestamp
+        timestamp: new Date(),
+        flaggedPending: false
       });
-      await newMsg.save();
+      const savedMsg = await newMsg.save();
+
+      const payload = {
+        _id: savedMsg._id.toString(),
+        room: cleanRoom,
+        senderRole: savedMsg.senderRole,
+        encryptedText: savedMsg.encryptedText,
+        timestamp: savedMsg.timestamp,
+        flaggedPending: false
+      };
+
+      io.to(cleanRoom).emit('receive_stealth_msg', payload);
     } catch (err) {
-      console.error("DB Save Warning:", err.message);
+      console.error("Save msg error:", err.message);
     }
   });
 
+  // Bookmark Pending Persistence
   socket.on('toggle_pending', async ({ messageId, status }) => {
     try {
-      await Message.findByIdAndUpdate(messageId, { flaggedPending: status });
-    } catch (e) {}
-    io.emit('update_msg_status', { messageId, flaggedPending: status });
+      const updated = await Message.findByIdAndUpdate(
+        messageId, 
+        { flaggedPending: status }, 
+        { new: true }
+      );
+      if (updated) {
+        io.to(updated.room).emit('update_msg_status', { 
+          messageId, 
+          flaggedPending: updated.flaggedPending 
+        });
+      }
+    } catch (e) {
+      console.error("Pending flag error:", e.message);
+    }
   });
 
   socket.on('send_assistant_alert', (data) => {
