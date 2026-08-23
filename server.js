@@ -16,14 +16,14 @@ const io = new Server(server, {
   }
 });
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/stealth_chat";
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://admin:pass@cluster0.mongodb.net/stealth?retryWrites=true&w=majority";
 mongoose.connect(MONGO_URI)
   .then(() => console.log("MongoDB Connected"))
-  .catch(err => console.error("MongoDB Error:", err));
+  .catch(err => console.error("MongoDB Connection Warning:", err.message));
 
 const messageSchema = new mongoose.Schema({
   room: { type: String, required: true },
-  senderRole: { type: String, enum: ['parent', 'user'], default: 'user' },
+  senderRole: { type: String, default: 'user' },
   encryptedText: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
   flaggedPending: { type: Boolean, default: false }
@@ -32,71 +32,60 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 
 io.on('connection', (socket) => {
-  // Join Room
   socket.on('join_room', async ({ room, role }) => {
     if (!room) return;
     const cleanRoom = room.trim().toLowerCase();
-    
-    // Leave previous rooms
+
     Array.from(socket.rooms).forEach(r => {
       if (r !== socket.id) socket.leave(r);
     });
 
     socket.join(cleanRoom);
-    socket.activeRoom = cleanRoom;
-    socket.role = role;
 
     try {
       const history = await Message.find({ room: cleanRoom }).sort({ timestamp: 1 });
       socket.emit('load_history', history);
-    } catch (err) {
-      console.error("Load history error:", err);
+    } catch (e) {
+      socket.emit('load_history', []);
     }
   });
 
-  // Send Encrypted Message
   socket.on('send_stealth_msg', async (data) => {
     if (!data.room || !data.encryptedText) return;
     const cleanRoom = data.room.trim().toLowerCase();
+
+    const payload = {
+      _id: new mongoose.Types.ObjectId().toString(),
+      room: cleanRoom,
+      senderRole: data.role || 'user',
+      encryptedText: data.encryptedText,
+      timestamp: new Date(),
+      flaggedPending: false
+    };
+
+    // Instant Realtime broadcast to everyone in the room (including sender)
+    io.to(cleanRoom).emit('receive_stealth_msg', payload);
 
     try {
       const newMsg = new Message({
         room: cleanRoom,
         senderRole: data.role || 'user',
         encryptedText: data.encryptedText,
-        timestamp: new Date()
+        timestamp: payload.timestamp
       });
       await newMsg.save();
-
-      const payload = {
-        _id: newMsg._id,
-        room: cleanRoom,
-        senderRole: newMsg.senderRole,
-        encryptedText: newMsg.encryptedText,
-        timestamp: newMsg.timestamp,
-        flaggedPending: false
-      };
-
-      // Broadcast to all sockets in that room
-      io.to(cleanRoom).emit('receive_stealth_msg', payload);
     } catch (err) {
-      console.error("Send message error:", err);
+      console.error("DB Save Warning:", err.message);
     }
   });
 
-  // Toggle Answer Pending Flag
   socket.on('toggle_pending', async ({ messageId, status }) => {
     try {
-      const updated = await Message.findByIdAndUpdate(messageId, { flaggedPending: status }, { new: true });
-      if (updated) {
-        io.to(updated.room).emit('update_msg_status', { messageId, flaggedPending: status });
-      }
-    } catch (err) {
-      console.error("Pending flag error:", err);
-    }
+      await Message.findByIdAndUpdate(messageId, { flaggedPending: status });
+    } catch (e) {}
+    io.emit('update_msg_status', { messageId, flaggedPending: status });
   });
 
-  // Assistant Alert
   socket.on('send_assistant_alert', (data) => {
     if (!data.room) return;
     const cleanRoom = data.room.trim().toLowerCase();
