@@ -20,7 +20,6 @@ const io = new Server(server, {
   }
 });
 
-// In-Memory Backup Store (Ensures 0% failure even if DB is reconnecting)
 const roomHistoryMemory = {};
 const pendingBookmarks = new Set();
 
@@ -32,12 +31,10 @@ if (MONGO_URI) {
 }
 
 io.on('connection', (socket) => {
-  // Join Room Channel
   socket.on('join_room', ({ room, role }) => {
     if (!room) return;
     const cleanRoom = room.trim().toLowerCase();
 
-    // Leave any other room except its own socket id
     Array.from(socket.rooms).forEach(r => {
       if (r !== socket.id) socket.leave(r);
     });
@@ -46,12 +43,10 @@ io.on('connection', (socket) => {
     socket.activeRoom = cleanRoom;
     socket.userRole = role;
 
-    // Send existing history instantly
     const history = roomHistoryMemory[cleanRoom] || [];
     socket.emit('load_history', history);
   });
 
-  // Send Message
   socket.on('send_stealth_msg', (data) => {
     if (!data.room || !data.encryptedText) return;
     const cleanRoom = data.room.trim().toLowerCase();
@@ -70,11 +65,9 @@ io.on('connection', (socket) => {
     }
     roomHistoryMemory[cleanRoom].push(payload);
 
-    // Instant Realtime broadcast to everyone in that room
     io.to(cleanRoom).emit('receive_stealth_msg', payload);
   });
 
-  // Bookmark Toggle
   socket.on('toggle_pending', ({ messageId, status, room }) => {
     if (status) {
       pendingBookmarks.add(messageId);
@@ -92,11 +85,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Assistant Alert
   socket.on('send_assistant_alert', (data) => {
     if (!data.room) return;
     const cleanRoom = data.room.trim().toLowerCase();
     socket.to(cleanRoom).emit('receive_assistant_alert', data);
+  });
+
+  // Bubble Popped Acknowledgment Event (User -> Parent)
+  socket.on('bubble_popped', (data) => {
+    if (!data.room) return;
+    const cleanRoom = data.room.trim().toLowerCase();
+    socket.to(cleanRoom).emit('parent_bubble_pop_notify', data);
   });
 });
 
