@@ -48,7 +48,7 @@ const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat Socket Engine v2" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine" });
 });
 
 io.on('connection', (socket) => {
@@ -77,22 +77,41 @@ io.on('connection', (socket) => {
     const room = (data && data.room) || socket.roomName || 'stealth_master_room';
     const role = (data && data.role) || '';
     socket.to(room).emit('peer_typing_status', { isTyping: true, senderRole: role });
-    socket.broadcast.emit('peer_typing_status', { isTyping: true, senderRole: role });
   });
 
   socket.on('typing_stop', (data) => {
     const room = (data && data.room) || socket.roomName || 'stealth_master_room';
     const role = (data && data.role) || '';
     socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
-    socket.broadcast.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
+  // Scheduled / Synced Handshake Sockets
+  socket.on('sync_send_invite', ({ room, role }) => {
+    socket.to(room).emit('sync_receive_invite', { fromRole: role });
+  });
+
+  socket.on('sync_confirm_invite', ({ room }) => {
+    io.to(room).emit('sync_connected_event');
+  });
+
+  socket.on('sync_disconnect_invite', ({ room }) => {
+    io.to(room).emit('sync_disconnected_event');
+  });
+
+  // Synchronized Media Track & Latency Playback Sync
+  socket.on('sync_track_change', ({ room, videoId }) => {
+    io.to(room).emit('sync_track_update', { videoId });
+  });
+
+  socket.on('sync_playback_state', ({ room, state, currentTime, timestamp }) => {
+    socket.to(room).emit('sync_playback_update', { state, currentTime, timestamp });
+  });
+
+  // Standard Stealth Chat Message Relay
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
-    // Reset typing status on message dispatch
     socket.to(room).emit('peer_typing_status', { isTyping: false });
-    socket.broadcast.emit('peer_typing_status', { isTyping: false });
 
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
