@@ -64,6 +64,8 @@ io.on('connection', (socket) => {
   // 1. Join Room & Load Full History
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
+    socket.currentRoom = room;
+    socket.currentRole = role;
     console.log(`Client ${socket.id} joined room "${room}" as role "${role}"`);
 
     try {
@@ -79,9 +81,22 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Real-time Typing Status Relays
+  socket.on('typing_start', ({ room, role }) => {
+    socket.to(room).emit('peer_typing_status', { isTyping: true, senderRole: role });
+  });
+
+  socket.on('typing_stop', ({ room, role }) => {
+    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+  });
+
   // 2. Send Message Relay (Text & Media)
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
+    
+    // Stop typing immediately when message is sent
+    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
       room,
@@ -110,7 +125,7 @@ io.on('connection', (socket) => {
     io.to(room).emit('receive_stealth_msg', newMsgData);
   });
 
-  // 3. Mark Messages Seen (Synchronizes '.' to '..')
+  // 3. Mark Messages Seen
   socket.on('mark_seen', async ({ room, viewerRole }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -132,7 +147,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 4. Mark Media Opened (Switches Locked EyeOff to Active Eye)
+  // 4. Mark Media Opened
   socket.on('mark_media_opened', async ({ room, messageId }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -203,6 +218,9 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    if (socket.currentRoom) {
+      socket.to(socket.currentRoom).emit('peer_typing_status', { isTyping: false });
+    }
     console.log(`Socket disconnected: ${socket.id}`);
   });
 });
