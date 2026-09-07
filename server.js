@@ -8,13 +8,11 @@ const mongoose = require('mongoose');
 const app = express();
 const server = http.createServer(app);
 
-// CORS setup
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST"]
 }));
 
-// Base64 images transfer ke liye large payload limit
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -27,14 +25,12 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-// MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/stealth_chat?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
   .then(() => console.log("Connected to MongoDB successfully."))
   .catch((err) => console.log("MongoDB connection fallback to memory:", err.message));
 
-// Message Schema
 const messageSchema = new mongoose.Schema({
   room: { type: String, required: true },
   senderRole: { type: String, required: true },
@@ -49,11 +45,8 @@ const messageSchema = new mongoose.Schema({
 });
 
 const Message = mongoose.model('Message', messageSchema);
-
-// In-Memory Fallback Store
 const memoryMessages = [];
 
-// Base Route
 app.get('/', (req, res) => {
   res.send({ status: "Online", service: "Stealth Secret Chat Socket Engine v2" });
 });
@@ -61,7 +54,6 @@ app.get('/', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
 
-  // 1. Join Room & Load Full History
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
     socket.roomName = room;
@@ -80,21 +72,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Direct Broadcast Typing Events (Zero filtering to guarantee instant trigger)
-  socket.on('typing_start', () => {
-    socket.broadcast.emit('peer_typing_status', true);
+  // Accurate Real-time Typing Handlers
+  socket.on('typing_start', (data) => {
+    const room = (data && data.room) || socket.roomName || 'stealth_master_room';
+    const role = (data && data.role) || '';
+    socket.to(room).emit('peer_typing_status', { isTyping: true, senderRole: role });
+    socket.broadcast.emit('peer_typing_status', { isTyping: true, senderRole: role });
   });
 
-  socket.on('typing_stop', () => {
-    socket.broadcast.emit('peer_typing_status', false);
+  socket.on('typing_stop', (data) => {
+    const room = (data && data.room) || socket.roomName || 'stealth_master_room';
+    const role = (data && data.role) || '';
+    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+    socket.broadcast.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // 2. Send Message Relay
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
-    // Message bhejte hi typing false ho jaye
-    socket.broadcast.emit('peer_typing_status', false);
+    // Reset typing status on message dispatch
+    socket.to(room).emit('peer_typing_status', { isTyping: false });
+    socket.broadcast.emit('peer_typing_status', { isTyping: false });
 
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
@@ -124,7 +122,6 @@ io.on('connection', (socket) => {
     io.to(room).emit('receive_stealth_msg', newMsgData);
   });
 
-  // 3. Mark Messages Seen
   socket.on('mark_seen', async ({ room, viewerRole }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -146,7 +143,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 4. Mark Media Opened
   socket.on('mark_media_opened', async ({ room, messageId }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -161,7 +157,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 5. Destroy View-Once Media
   socket.on('destroy_view_once', async ({ room, messageId }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -177,7 +172,6 @@ io.on('connection', (socket) => {
     io.to(room).emit('message_destroyed_on_view', { messageId });
   });
 
-  // 6. Reaction Synchronization
   socket.on('add_reaction', async ({ room, messageId, reaction }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -192,7 +186,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 7. Answer Pending Flag Toggle
   socket.on('toggle_pending', async ({ messageId, status, room }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -207,7 +200,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 8. Alerts
   socket.on('send_assistant_alert', ({ room, text }) => {
     io.to(room).emit('receive_assistant_alert', { text, timestamp: Date.now() });
   });
@@ -217,7 +209,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    socket.broadcast.emit('peer_typing_status', false);
+    socket.broadcast.emit('peer_typing_status', { isTyping: false });
     console.log(`Socket disconnected: ${socket.id}`);
   });
 });
