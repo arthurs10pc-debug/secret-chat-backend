@@ -23,7 +23,7 @@ const io = new Server(server, {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  maxHttpBufferSize: 5e7, // 50MB socket transfer buffer
+  maxHttpBufferSize: 5e7,
   transports: ['websocket', 'polling']
 });
 
@@ -37,7 +37,7 @@ mongoose.connect(MONGO_URI)
 // Message Schema
 const messageSchema = new mongoose.Schema({
   room: { type: String, required: true },
-  senderRole: { type: String, required: true }, // 'user' (A) or 'parent' (H)
+  senderRole: { type: String, required: true },
   encryptedText: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
   flaggedPending: { type: Boolean, default: false },
@@ -64,8 +64,7 @@ io.on('connection', (socket) => {
   // 1. Join Room & Load Full History
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
-    socket.currentRoom = room;
-    socket.currentRole = role;
+    socket.roomName = room;
     console.log(`Client ${socket.id} joined room "${room}" as role "${role}"`);
 
     try {
@@ -81,21 +80,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Real-time Typing Status Relays
-  socket.on('typing_start', ({ room, role }) => {
-    socket.to(room).emit('peer_typing_status', { isTyping: true, senderRole: role });
+  // Direct Broadcast Typing Events (Zero filtering to guarantee instant trigger)
+  socket.on('typing_start', () => {
+    socket.broadcast.emit('peer_typing_status', true);
   });
 
-  socket.on('typing_stop', ({ room, role }) => {
-    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+  socket.on('typing_stop', () => {
+    socket.broadcast.emit('peer_typing_status', false);
   });
 
-  // 2. Send Message Relay (Text & Media)
+  // 2. Send Message Relay
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
-    // Stop typing immediately when message is sent
-    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+    // Message bhejte hi typing false ho jaye
+    socket.broadcast.emit('peer_typing_status', false);
 
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
@@ -162,7 +161,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 5. Destroy View-Once Media from Stream
+  // 5. Destroy View-Once Media
   socket.on('destroy_view_once', async ({ room, messageId }) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -208,7 +207,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 8. Glass Bubble Broadcast & Pop Notification
+  // 8. Alerts
   socket.on('send_assistant_alert', ({ room, text }) => {
     io.to(room).emit('receive_assistant_alert', { text, timestamp: Date.now() });
   });
@@ -218,9 +217,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (socket.currentRoom) {
-      socket.to(socket.currentRoom).emit('peer_typing_status', { isTyping: false });
-    }
+    socket.broadcast.emit('peer_typing_status', false);
     console.log(`Socket disconnected: ${socket.id}`);
   });
 });
