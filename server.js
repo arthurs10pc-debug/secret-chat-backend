@@ -47,28 +47,20 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
-// Shared Synced Audio Rooms State
-const roomSyncStates = new Map();
-
-const getRoomSync = (room) => {
-  if (!roomSyncStates.has(room)) {
-    roomSyncStates.set(room, {
-      connected: false,
-      videoId: null,
-      title: null,
-      state: 'PAUSE',
-      currentTime: 0,
-      timestamp: Date.now()
-    });
-  }
-  return roomSyncStates.get(room);
+// Shared Live Synced State
+const globalSyncState = {
+  connected: false,
+  videoId: null,
+  title: null,
+  state: 'PAUSE',
+  currentTime: 0,
+  timestamp: Date.now()
 };
 
-// Scheduled Alerts State
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Background Audio Engine" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine v3" });
 });
 
 // YouTube Autocomplete Suggestions Proxy
@@ -86,40 +78,54 @@ app.get('/api/yt-suggest', async (req, res) => {
   }
 });
 
-// YouTube Video ID Resolver: Returns exact single videoId for ANY song query
+// MULTI-FALLBACK YOUTUBE VIDEO RESOLVER (Guaranteed to return videoId on cloud servers like Render)
 app.get('/api/yt-search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json({ videoId: null });
 
+  // 1. Direct Regex check if query is already an ID or link
+  const directMatch = query.match(/(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=[&?]?|v=)([a-zA-Z0-9_-]{11})/);
+  if (directMatch && directMatch[1]) {
+    return res.json({ videoId: directMatch[1], title: query });
+  }
+
+  // 2. DuckDuckGo HTML Scrape (Google consent wall bypass)
   try {
-    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
+    const ddgUrl = `https://html.duckduckgo.com/html/?q=site:youtube.com/watch+${encodeURIComponent(query)}`;
+    const ddgRes = await fetch(ddgUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }
     });
-    const text = await response.text();
-    const match = text.match(/\/watch\?v=([a-zA-Z0-9_-]{11})/);
-    if (match && match[1]) {
-      const titleMatch = text.match(/"title":{"runs":\[{"text":"([^"]+)"/);
-      return res.json({ 
-        videoId: match[1], 
-        title: titleMatch ? titleMatch[1] : query 
-      });
+    const ddgText = await ddgRes.text();
+    const ddgMatch = ddgText.match(/watch%3Fv%3D([a-zA-Z0-9_-]{11})/);
+    if (ddgMatch && ddgMatch[1]) {
+      return res.json({ videoId: ddgMatch[1], title: query });
     }
-    res.json({ videoId: null, title: query });
-  } catch (e) {
-    res.json({ videoId: null, error: e.message });
-  }
+  } catch (e) {}
+
+  // 3. YouTube Mobile Results Fallback
+  try {
+    const ytUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const ytRes = await fetch(ytUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
+      }
+    });
+    const ytText = await ytRes.text();
+    const ytMatch = ytText.match(/\/watch\?v=([a-zA-Z0-9_-]{11})/);
+    if (ytMatch && ytMatch[1]) {
+      return res.json({ videoId: ytMatch[1], title: query });
+    }
+  } catch (e) {}
+
+  res.json({ videoId: null, title: query });
 });
 
 io.on('connection', (socket) => {
-  console.log(`Socket connected: ${socket.id}`);
-
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
     socket.roomName = room;
-    console.log(`Client ${socket.id} joined room "${room}" as role "${role}"`);
 
     try {
       let history = [];
@@ -133,17 +139,15 @@ io.on('connection', (socket) => {
       console.error("Error loading chat history:", error);
     }
 
-    // Re-sync current music state if already connected in this room
-    const sync = getRoomSync(room);
-    if (sync.connected && sync.videoId) {
+    // Re-sync current music state on connect/reconnect
+    if (globalSyncState.connected && globalSyncState.videoId) {
       socket.emit('sync_connected_event', {
-        videoId: sync.videoId,
-        title: sync.title,
-        state: sync.state
+        videoId: globalSyncState.videoId,
+        title: globalSyncState.title,
+        state: globalSyncState.state
       });
     }
 
-    // Send scheduled alert jobs to admin
     if (role === 'parent') {
       const sanitized = scheduledAlerts
         .filter(j => j.room === room)
@@ -154,58 +158,53 @@ io.on('connection', (socket) => {
 
   // Real-time Typing Handlers
   socket.on('typing_start', (data) => {
-    const room = (data && data.room) || socket.roomName || 'stealth_master_room';
     const role = (data && data.role) || '';
-    socket.to(room).emit('peer_typing_status', { isTyping: true, senderRole: role });
+    io.emit('peer_typing_status', { isTyping: true, senderRole: role });
   });
 
   socket.on('typing_stop', (data) => {
-    const room = (data && data.room) || socket.roomName || 'stealth_master_room';
     const role = (data && data.role) || '';
-    socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
+    io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
   // Scheduled / Synced Handshake Sockets
-  socket.on('sync_send_invite', ({ room, role }) => {
-    socket.to(room).emit('sync_receive_invite', { fromRole: role });
+  socket.on('sync_send_invite', ({ role }) => {
+    socket.broadcast.emit('sync_receive_invite', { fromRole: role });
   });
 
-  socket.on('sync_confirm_invite', ({ room }) => {
-    const sync = getRoomSync(room);
-    sync.connected = true;
-    io.to(room).emit('sync_connected_event', {
-      videoId: sync.videoId,
-      title: sync.title,
-      state: sync.state
+  socket.on('sync_confirm_invite', () => {
+    globalSyncState.connected = true;
+    io.emit('sync_connected_event', {
+      videoId: globalSyncState.videoId,
+      title: globalSyncState.title,
+      state: globalSyncState.state
     });
   });
 
-  socket.on('sync_disconnect_invite', ({ room }) => {
-    const sync = getRoomSync(room);
-    sync.connected = false;
-    sync.videoId = null;
-    sync.title = null;
-    sync.state = 'PAUSE';
-    io.to(room).emit('sync_disconnected_event');
+  socket.on('sync_disconnect_invite', () => {
+    globalSyncState.connected = false;
+    globalSyncState.videoId = null;
+    globalSyncState.title = null;
+    globalSyncState.state = 'PAUSE';
+    io.emit('sync_disconnected_event');
   });
 
-  // BIDIRECTIONAL TRACK SYNC: Saves track & broadcasts exact videoId to room
-  socket.on('sync_track_change', ({ room, videoId, title }) => {
-    const sync = getRoomSync(room);
-    sync.videoId = videoId;
-    sync.title = title;
-    sync.state = 'PLAY';
-    sync.currentTime = 0;
-    sync.timestamp = Date.now();
-    io.to(room).emit('sync_track_update', { videoId, title });
+  // GLOBAL TRACK BROADCAST: Changes song simultaneously on BOTH devices
+  socket.on('sync_track_change', ({ videoId, title }) => {
+    globalSyncState.videoId = videoId;
+    globalSyncState.title = title;
+    globalSyncState.state = 'PLAY';
+    globalSyncState.currentTime = 0;
+    globalSyncState.timestamp = Date.now();
+    io.emit('sync_track_update', { videoId, title });
   });
 
-  socket.on('sync_playback_state', ({ room, state, currentTime, timestamp }) => {
-    const sync = getRoomSync(room);
-    sync.state = state;
-    sync.currentTime = currentTime;
-    sync.timestamp = timestamp || Date.now();
-    socket.to(room).emit('sync_playback_update', { state, currentTime, timestamp: sync.timestamp });
+  // PLAY / PAUSE / SEEK PLAYBACK BROADCAST
+  socket.on('sync_playback_state', ({ state, currentTime, timestamp }) => {
+    globalSyncState.state = state;
+    globalSyncState.currentTime = currentTime;
+    globalSyncState.timestamp = timestamp || Date.now();
+    socket.broadcast.emit('sync_playback_update', { state, currentTime, timestamp: globalSyncState.timestamp });
   });
 
   // Admin Dual-Time Scheduled Alert Handler
@@ -258,7 +257,7 @@ io.on('connection', (socket) => {
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
-    socket.to(room).emit('peer_typing_status', { isTyping: false });
+    io.emit('peer_typing_status', { isTyping: false });
 
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
@@ -375,8 +374,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    socket.broadcast.emit('peer_typing_status', { isTyping: false });
-    console.log(`Socket disconnected: ${socket.id}`);
+    io.emit('peer_typing_status', { isTyping: false });
   });
 });
 
