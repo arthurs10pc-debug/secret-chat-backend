@@ -60,7 +60,7 @@ const globalSyncState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine v3" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine v4" });
 });
 
 // YouTube Autocomplete Suggestions Proxy
@@ -78,18 +78,18 @@ app.get('/api/yt-suggest', async (req, res) => {
   }
 });
 
-// MULTI-FALLBACK YOUTUBE VIDEO RESOLVER (Guaranteed to return videoId on cloud servers like Render)
+// MULTI-FALLBACK YOUTUBE VIDEO RESOLVER: Returns exact identical videoId for both devices
 app.get('/api/yt-search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json({ videoId: null });
 
-  // 1. Direct Regex check if query is already an ID or link
+  // 1. Check if direct video ID or YouTube Link
   const directMatch = query.match(/(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=[&?]?|v=)([a-zA-Z0-9_-]{11})/);
   if (directMatch && directMatch[1]) {
     return res.json({ videoId: directMatch[1], title: query });
   }
 
-  // 2. DuckDuckGo HTML Scrape (Google consent wall bypass)
+  // 2. DuckDuckGo Scrape (Bypasses Google consent & IP bot locks on cloud)
   try {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=site:youtube.com/watch+${encodeURIComponent(query)}`;
     const ddgRes = await fetch(ddgUrl, {
@@ -104,7 +104,7 @@ app.get('/api/yt-search', async (req, res) => {
     }
   } catch (e) {}
 
-  // 3. YouTube Mobile Results Fallback
+  // 3. YouTube Mobile Search Fallback
   try {
     const ytUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`;
     const ytRes = await fetch(ytUrl, {
@@ -139,15 +139,6 @@ io.on('connection', (socket) => {
       console.error("Error loading chat history:", error);
     }
 
-    // Re-sync current music state on connect/reconnect
-    if (globalSyncState.connected && globalSyncState.videoId) {
-      socket.emit('sync_connected_event', {
-        videoId: globalSyncState.videoId,
-        title: globalSyncState.title,
-        state: globalSyncState.state
-      });
-    }
-
     if (role === 'parent') {
       const sanitized = scheduledAlerts
         .filter(j => j.room === room)
@@ -167,17 +158,22 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // Scheduled / Synced Handshake Sockets
+  // Handshake Invitations
   socket.on('sync_send_invite', ({ role }) => {
     socket.broadcast.emit('sync_receive_invite', { fromRole: role });
   });
 
+  // CLEAN SLATE ON CONNECT: Wipe stale cached tracks completely
   socket.on('sync_confirm_invite', () => {
     globalSyncState.connected = true;
+    globalSyncState.videoId = null;
+    globalSyncState.title = null;
+    globalSyncState.state = 'PAUSE';
+    globalSyncState.currentTime = 0;
     io.emit('sync_connected_event', {
-      videoId: globalSyncState.videoId,
-      title: globalSyncState.title,
-      state: globalSyncState.state
+      videoId: null,
+      title: null,
+      state: 'PAUSE'
     });
   });
 
@@ -186,10 +182,11 @@ io.on('connection', (socket) => {
     globalSyncState.videoId = null;
     globalSyncState.title = null;
     globalSyncState.state = 'PAUSE';
+    globalSyncState.currentTime = 0;
     io.emit('sync_disconnected_event');
   });
 
-  // GLOBAL TRACK BROADCAST: Changes song simultaneously on BOTH devices
+  // GLOBAL TRACK BROADCAST: Emits identical videoId to both devices
   socket.on('sync_track_change', ({ videoId, title }) => {
     globalSyncState.videoId = videoId;
     globalSyncState.title = title;
