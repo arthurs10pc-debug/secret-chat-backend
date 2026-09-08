@@ -47,8 +47,27 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
+// In-Memory Scheduled Alerts State
+const scheduledAlerts = [];
+
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Background Audio Engine" });
+});
+
+// YouTube Autocomplete Suggestions Proxy
+app.get('/api/yt-suggest', async (req, res) => {
+  const query = req.query.q;
+  if (!query) return res.json([]);
+
+  try {
+    const url = `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodeURIComponent(query)}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    // data structure: [query, [sugg1, sugg2, ...]]
+    res.json(data[1] || []);
+  } catch (e) {
+    res.json([]);
+  }
 });
 
 io.on('connection', (socket) => {
@@ -70,9 +89,17 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error("Error loading chat history:", error);
     }
+
+    // Send currently scheduled active jobs to admin
+    if (role === 'parent') {
+      const sanitized = scheduledAlerts
+        .filter(j => j.room === room)
+        .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
+      socket.emit('scheduled_jobs_update', sanitized);
+    }
   });
 
-  // Accurate Real-time Typing Handlers
+  // Real-time Typing Indicator
   socket.on('typing_start', (data) => {
     const room = (data && data.room) || socket.roomName || 'stealth_master_room';
     const role = (data && data.role) || '';
@@ -85,7 +112,7 @@ io.on('connection', (socket) => {
     socket.to(room).emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // Scheduled / Synced Handshake Sockets
+  // Scheduled / Synced Music Handshake
   socket.on('sync_send_invite', ({ room, role }) => {
     socket.to(room).emit('sync_receive_invite', { fromRole: role });
   });
@@ -98,16 +125,63 @@ io.on('connection', (socket) => {
     io.to(room).emit('sync_disconnected_event');
   });
 
-  // Synchronized Media Track & Latency Playback Sync
-  socket.on('sync_track_change', ({ room, videoId }) => {
-    io.to(room).emit('sync_track_update', { videoId });
+  // Synchronized Media Track & Playback
+  socket.on('sync_track_change', ({ room, trackData, title }) => {
+    io.to(room).emit('sync_track_update', { trackData, title });
   });
 
   socket.on('sync_playback_state', ({ room, state, currentTime, timestamp }) => {
     socket.to(room).emit('sync_playback_update', { state, currentTime, timestamp });
   });
 
-  // Standard Stealth Chat Message Relay
+  // Admin Dual-Time Scheduled Alert Handler
+  socket.on('schedule_bubble_alert', ({ room, text, time1, time2 }) => {
+    const queueItem = (timeStr) => {
+      if (!timeStr) return;
+      const targetTime = new Date(timeStr).getTime();
+      const delay = targetTime - Date.now();
+
+      if (delay > 0) {
+        const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+        const timerId = setTimeout(() => {
+          io.to(room).emit('receive_assistant_alert', { text, timestamp: Date.now() });
+
+          // Auto-remove after firing
+          const index = scheduledAlerts.findIndex(j => j.id === jobId);
+          if (index !== -1) scheduledAlerts.splice(index, 1);
+
+          const sanitized = scheduledAlerts
+            .filter(j => j.room === room)
+            .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
+          io.to(room).emit('scheduled_jobs_update', sanitized);
+        }, delay);
+
+        scheduledAlerts.push({ id: jobId, room, text, timeStr, timerId });
+      }
+    };
+
+    queueItem(time1);
+    queueItem(time2);
+
+    const sanitized = scheduledAlerts
+      .filter(j => j.room === room)
+      .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
+    io.to(room).emit('scheduled_jobs_update', sanitized);
+  });
+
+  socket.on('cancel_scheduled_job', ({ room, jobId }) => {
+    const index = scheduledAlerts.findIndex(j => j.id === jobId);
+    if (index !== -1) {
+      clearTimeout(scheduledAlerts[index].timerId);
+      scheduledAlerts.splice(index, 1);
+    }
+    const sanitized = scheduledAlerts
+      .filter(j => j.room === room)
+      .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
+    io.to(room).emit('scheduled_jobs_update', sanitized);
+  });
+
+  // Stealth Chat Relay
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
