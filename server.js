@@ -47,20 +47,38 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
-// Shared Live Synced State
+// Shared Synced Audio State (With Live Running Clock for Zero Interruption on Refresh)
 const globalSyncState = {
   connected: false,
   videoId: null,
   title: null,
   state: 'PAUSE',
   currentTime: 0,
-  timestamp: Date.now()
+  lastUpdated: Date.now()
+};
+
+function getAccurateSyncTime() {
+  if (globalSyncState.state === 'PLAY' && globalSyncState.lastUpdated) {
+    const elapsed = (Date.now() - globalSyncState.lastUpdated) / 1000;
+    return Math.max(0, globalSyncState.currentTime + elapsed);
+  }
+  return globalSyncState.currentTime;
+}
+
+// Codex Cinema Live Shared State
+const codexCinemaState = {
+  engine: 'gofile',
+  url: '',
+  ytId: '',
+  state: 'PAUSE',
+  currentTime: 0,
+  lastUpdated: Date.now()
 };
 
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio Engine v4" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v6" });
 });
 
 // YouTube Autocomplete Suggestions Proxy
@@ -78,18 +96,16 @@ app.get('/api/yt-suggest', async (req, res) => {
   }
 });
 
-// MULTI-FALLBACK YOUTUBE VIDEO RESOLVER: Returns exact identical videoId for both devices
+// Universal Multi-Fallback Search Resolver
 app.get('/api/yt-search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json({ videoId: null });
 
-  // 1. Check if direct video ID or YouTube Link
   const directMatch = query.match(/(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=[&?]?|v=)([a-zA-Z0-9_-]{11})/);
   if (directMatch && directMatch[1]) {
     return res.json({ videoId: directMatch[1], title: query });
   }
 
-  // 2. DuckDuckGo Scrape (Bypasses Google consent & IP bot locks on cloud)
   try {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=site:youtube.com/watch+${encodeURIComponent(query)}`;
     const ddgRes = await fetch(ddgUrl, {
@@ -104,7 +120,6 @@ app.get('/api/yt-search', async (req, res) => {
     }
   } catch (e) {}
 
-  // 3. YouTube Mobile Search Fallback
   try {
     const ytUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`;
     const ytRes = await fetch(ytUrl, {
@@ -139,6 +154,23 @@ io.on('connection', (socket) => {
       console.error("Error loading chat history:", error);
     }
 
+    // AUTO-RESTORE AUDIO ON REFRESH (Resumes exact millisecond frame)
+    if (globalSyncState.connected && globalSyncState.videoId) {
+      socket.emit('sync_restore_state', {
+        connected: true,
+        videoId: globalSyncState.videoId,
+        title: globalSyncState.title,
+        state: globalSyncState.state,
+        currentTime: getAccurateSyncTime(),
+        timestamp: Date.now()
+      });
+    }
+
+    // AUTO-RESTORE CODEX CINEMA ON REFRESH
+    if (codexCinemaState.url || codexCinemaState.ytId) {
+      socket.emit('codex_restore_state', codexCinemaState);
+    }
+
     if (role === 'parent') {
       const sanitized = scheduledAlerts
         .filter(j => j.room === room)
@@ -147,7 +179,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Real-time Typing Handlers
   socket.on('typing_start', (data) => {
     const role = (data && data.role) || '';
     io.emit('peer_typing_status', { isTyping: true, senderRole: role });
@@ -158,22 +189,17 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // Handshake Invitations
   socket.on('sync_send_invite', ({ role }) => {
     socket.broadcast.emit('sync_receive_invite', { fromRole: role });
   });
 
-  // CLEAN SLATE ON CONNECT: Wipe stale cached tracks completely
   socket.on('sync_confirm_invite', () => {
     globalSyncState.connected = true;
-    globalSyncState.videoId = null;
-    globalSyncState.title = null;
-    globalSyncState.state = 'PAUSE';
-    globalSyncState.currentTime = 0;
     io.emit('sync_connected_event', {
-      videoId: null,
-      title: null,
-      state: 'PAUSE'
+      connected: true,
+      videoId: globalSyncState.videoId,
+      title: globalSyncState.title,
+      state: globalSyncState.state
     });
   });
 
@@ -186,25 +212,49 @@ io.on('connection', (socket) => {
     io.emit('sync_disconnected_event');
   });
 
-  // GLOBAL TRACK BROADCAST: Emits identical videoId to both devices
   socket.on('sync_track_change', ({ videoId, title }) => {
+    globalSyncState.connected = true;
     globalSyncState.videoId = videoId;
     globalSyncState.title = title;
     globalSyncState.state = 'PLAY';
     globalSyncState.currentTime = 0;
-    globalSyncState.timestamp = Date.now();
+    globalSyncState.lastUpdated = Date.now();
     io.emit('sync_track_update', { videoId, title });
   });
 
-  // PLAY / PAUSE / SEEK PLAYBACK BROADCAST
   socket.on('sync_playback_state', ({ state, currentTime, timestamp }) => {
     globalSyncState.state = state;
-    globalSyncState.currentTime = currentTime;
-    globalSyncState.timestamp = timestamp || Date.now();
-    socket.broadcast.emit('sync_playback_update', { state, currentTime, timestamp: globalSyncState.timestamp });
+    globalSyncState.currentTime = currentTime || 0;
+    globalSyncState.lastUpdated = timestamp || Date.now();
+    socket.broadcast.emit('sync_playback_update', { 
+      state, 
+      currentTime: globalSyncState.currentTime, 
+      timestamp: globalSyncState.lastUpdated 
+    });
   });
 
-  // Admin Dual-Time Scheduled Alert Handler
+  // CODEX CINEMA MOVIE RELAYS
+  socket.on('codex_movie_load', ({ engine, url, ytId }) => {
+    codexCinemaState.engine = engine;
+    codexCinemaState.url = url || '';
+    codexCinemaState.ytId = ytId || '';
+    codexCinemaState.state = engine === 'youtube' ? 'PLAY' : 'PAUSE';
+    codexCinemaState.currentTime = 0;
+    codexCinemaState.lastUpdated = Date.now();
+    io.emit('codex_movie_load_broadcast', { engine, url, ytId });
+  });
+
+  socket.on('codex_movie_sync', ({ state, currentTime, timestamp }) => {
+    codexCinemaState.state = state;
+    codexCinemaState.currentTime = currentTime || 0;
+    codexCinemaState.lastUpdated = timestamp || Date.now();
+    socket.broadcast.emit('codex_movie_sync_broadcast', { 
+      state, 
+      currentTime: codexCinemaState.currentTime, 
+      timestamp: codexCinemaState.lastUpdated 
+    });
+  });
+
   socket.on('schedule_bubble_alert', ({ room, text, time1, time2 }) => {
     const queueItem = (timeStr) => {
       if (!timeStr) return;
@@ -250,7 +300,7 @@ io.on('connection', (socket) => {
     io.to(room).emit('scheduled_jobs_update', sanitized);
   });
 
-  // Stealth Chat Relay
+  // ULTRA-FAST SEEN RECEIPT LOGIC (Instant socket emit without waiting for DB write)
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
@@ -270,95 +320,78 @@ io.on('connection', (socket) => {
       replyRefId: replyRefId || null
     };
 
+    // Instant Socket Broadcast
+    io.to(room).emit('receive_stealth_msg', newMsgData);
+
+    // Background Async Persistence
     try {
       if (mongoose.connection.readyState === 1) {
-        const savedMsg = await Message.create(newMsgData);
-        newMsgData._id = savedMsg._id.toString();
+        Message.create(newMsgData).catch(console.error);
       } else {
         memoryMessages.push(newMsgData);
       }
     } catch (err) {
       console.error("Error saving message:", err);
     }
-
-    io.to(room).emit('receive_stealth_msg', newMsgData);
   });
 
   socket.on('mark_seen', async ({ room, viewerRole }) => {
-    try {
-      if (mongoose.connection.readyState === 1) {
-        await Message.updateMany(
-          { room, senderRole: { $ne: viewerRole }, isSeen: false },
-          { $set: { isSeen: true } }
-        );
-      } else {
-        memoryMessages.forEach(m => {
-          if (m.room === room && m.senderRole !== viewerRole) {
-            m.isSeen = true;
-          }
-        });
-      }
+    // 1. Instant socket broadcast to change . to .. in under 10ms
+    io.to(room).emit('messages_marked_seen', { viewerRole });
 
-      io.to(room).emit('messages_marked_seen', { viewerRole });
-    } catch (err) {
-      console.error("Error processing seen status:", err);
+    // 2. Instant in-memory update
+    memoryMessages.forEach(m => {
+      if (m.room === room && m.senderRole !== viewerRole) {
+        m.isSeen = true;
+      }
+    });
+
+    // 3. Background DB update
+    if (mongoose.connection.readyState === 1) {
+      Message.updateMany(
+        { room, senderRole: { $ne: viewerRole }, isSeen: false },
+        { $set: { isSeen: true } }
+      ).catch(console.error);
     }
   });
 
   socket.on('mark_media_opened', async ({ room, messageId }) => {
-    try {
-      if (mongoose.connection.readyState === 1) {
-        await Message.findByIdAndUpdate(messageId, { mediaOpened: true });
-      } else {
-        const target = memoryMessages.find(m => m._id === messageId);
-        if (target) target.mediaOpened = true;
-      }
-      io.to(room).emit('media_marked_opened', { messageId });
-    } catch (err) {
-      console.error("Error updating media opened state:", err);
+    io.to(room).emit('media_marked_opened', { messageId });
+    if (mongoose.connection.readyState === 1) {
+      Message.findByIdAndUpdate(messageId, { mediaOpened: true }).catch(console.error);
+    } else {
+      const target = memoryMessages.find(m => m._id === messageId);
+      if (target) target.mediaOpened = true;
     }
   });
 
   socket.on('destroy_view_once', async ({ room, messageId }) => {
-    try {
-      if (mongoose.connection.readyState === 1) {
-        await Message.findByIdAndDelete(messageId);
-      } else {
-        const idx = memoryMessages.findIndex(m => m._id === messageId);
-        if (idx !== -1) memoryMessages.splice(idx, 1);
-      }
-    } catch (err) {
-      console.error("Error deleting view-once asset:", err);
-    }
-
     io.to(room).emit('message_destroyed_on_view', { messageId });
+    if (mongoose.connection.readyState === 1) {
+      Message.findByIdAndDelete(messageId).catch(console.error);
+    } else {
+      const idx = memoryMessages.findIndex(m => m._id === messageId);
+      if (idx !== -1) memoryMessages.splice(idx, 1);
+    }
   });
 
   socket.on('add_reaction', async ({ room, messageId, reaction }) => {
-    try {
-      if (mongoose.connection.readyState === 1) {
-        await Message.findByIdAndUpdate(messageId, { reaction });
-      } else {
-        const target = memoryMessages.find(m => m._id === messageId);
-        if (target) target.reaction = reaction;
-      }
-      io.to(room).emit('update_message_reaction', { messageId, reaction });
-    } catch (err) {
-      console.error("Error updating reaction:", err);
+    io.to(room).emit('update_message_reaction', { messageId, reaction });
+    if (mongoose.connection.readyState === 1) {
+      Message.findByIdAndUpdate(messageId, { reaction }).catch(console.error);
+    } else {
+      const target = memoryMessages.find(m => m._id === messageId);
+      if (target) target.reaction = reaction;
     }
   });
 
   socket.on('toggle_pending', async ({ messageId, status, room }) => {
-    try {
-      if (mongoose.connection.readyState === 1) {
-        await Message.findByIdAndUpdate(messageId, { flaggedPending: status });
-      } else {
-        const target = memoryMessages.find(m => m._id === messageId);
-        if (target) target.flaggedPending = status;
-      }
-      io.to(room).emit('update_msg_status', { messageId, flaggedPending: status });
-    } catch (err) {
-      console.error("Error toggling pending flag:", err);
+    io.to(room).emit('update_msg_status', { messageId, flaggedPending: status });
+    if (mongoose.connection.readyState === 1) {
+      Message.findByIdAndUpdate(messageId, { flaggedPending: status }).catch(console.error);
+    } else {
+      const target = memoryMessages.find(m => m._id === messageId);
+      if (target) target.flaggedPending = status;
     }
   });
 
