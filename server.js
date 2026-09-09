@@ -47,7 +47,7 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
-// Shared Synced Audio State (With Live Running Clock for Zero Interruption on Refresh)
+// Shared Synced Audio State
 const globalSyncState = {
   connected: false,
   videoId: null,
@@ -65,11 +65,12 @@ function getAccurateSyncTime() {
   return globalSyncState.currentTime;
 }
 
-// Codex Cinema Live Shared State
+// Codex Cinema 4-Engine Shared State
 const codexCinemaState = {
   engine: 'gofile',
   url: '',
   ytId: '',
+  embedUrl: '',
   state: 'PAUSE',
   currentTime: 0,
   lastUpdated: Date.now()
@@ -78,7 +79,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v6" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v7" });
 });
 
 // YouTube Autocomplete Suggestions Proxy
@@ -154,7 +155,6 @@ io.on('connection', (socket) => {
       console.error("Error loading chat history:", error);
     }
 
-    // AUTO-RESTORE AUDIO ON REFRESH (Resumes exact millisecond frame)
     if (globalSyncState.connected && globalSyncState.videoId) {
       socket.emit('sync_restore_state', {
         connected: true,
@@ -166,8 +166,7 @@ io.on('connection', (socket) => {
       });
     }
 
-    // AUTO-RESTORE CODEX CINEMA ON REFRESH
-    if (codexCinemaState.url || codexCinemaState.ytId) {
+    if (codexCinemaState.url || codexCinemaState.ytId || codexCinemaState.embedUrl || codexCinemaState.engine === 'local') {
       socket.emit('codex_restore_state', codexCinemaState);
     }
 
@@ -233,15 +232,16 @@ io.on('connection', (socket) => {
     });
   });
 
-  // CODEX CINEMA MOVIE RELAYS
-  socket.on('codex_movie_load', ({ engine, url, ytId }) => {
+  // CODEX 4-ENGINE MOVIE RELAY
+  socket.on('codex_movie_load', ({ engine, url, ytId, embedUrl }) => {
     codexCinemaState.engine = engine;
     codexCinemaState.url = url || '';
     codexCinemaState.ytId = ytId || '';
+    codexCinemaState.embedUrl = embedUrl || '';
     codexCinemaState.state = engine === 'youtube' ? 'PLAY' : 'PAUSE';
     codexCinemaState.currentTime = 0;
     codexCinemaState.lastUpdated = Date.now();
-    io.emit('codex_movie_load_broadcast', { engine, url, ytId });
+    io.emit('codex_movie_load_broadcast', { engine, url, ytId, embedUrl });
   });
 
   socket.on('codex_movie_sync', ({ state, currentTime, timestamp }) => {
@@ -300,7 +300,6 @@ io.on('connection', (socket) => {
     io.to(room).emit('scheduled_jobs_update', sanitized);
   });
 
-  // ULTRA-FAST SEEN RECEIPT LOGIC (Instant socket emit without waiting for DB write)
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     
@@ -320,10 +319,8 @@ io.on('connection', (socket) => {
       replyRefId: replyRefId || null
     };
 
-    // Instant Socket Broadcast
     io.to(room).emit('receive_stealth_msg', newMsgData);
 
-    // Background Async Persistence
     try {
       if (mongoose.connection.readyState === 1) {
         Message.create(newMsgData).catch(console.error);
@@ -336,17 +333,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('mark_seen', async ({ room, viewerRole }) => {
-    // 1. Instant socket broadcast to change . to .. in under 10ms
     io.to(room).emit('messages_marked_seen', { viewerRole });
 
-    // 2. Instant in-memory update
     memoryMessages.forEach(m => {
       if (m.room === room && m.senderRole !== viewerRole) {
         m.isSeen = true;
       }
     });
 
-    // 3. Background DB update
     if (mongoose.connection.readyState === 1) {
       Message.updateMany(
         { room, senderRole: { $ne: viewerRole }, isSeen: false },
