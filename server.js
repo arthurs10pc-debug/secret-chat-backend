@@ -71,6 +71,7 @@ const codexCinemaState = {
   url: '',
   ytId: '',
   embedUrl: '',
+  imdbId: '',
   state: 'PAUSE',
   currentTime: 0,
   lastUpdated: Date.now()
@@ -79,10 +80,9 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v7" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v8" });
 });
 
-// YouTube Autocomplete Suggestions Proxy
 app.get('/api/yt-suggest', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json([]);
@@ -97,7 +97,6 @@ app.get('/api/yt-suggest', async (req, res) => {
   }
 });
 
-// Universal Multi-Fallback Search Resolver
 app.get('/api/yt-search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json({ videoId: null });
@@ -232,16 +231,17 @@ io.on('connection', (socket) => {
     });
   });
 
-  // CODEX 4-ENGINE MOVIE RELAY
-  socket.on('codex_movie_load', ({ engine, url, ytId, embedUrl }) => {
+  // CODEX 4-ENGINE MOVIE RELAY (Includes senderRole to prevent echo reload)
+  socket.on('codex_movie_load', ({ engine, url, ytId, embedUrl, imdbId, senderRole }) => {
     codexCinemaState.engine = engine;
     codexCinemaState.url = url || '';
     codexCinemaState.ytId = ytId || '';
     codexCinemaState.embedUrl = embedUrl || '';
+    codexCinemaState.imdbId = imdbId || '';
     codexCinemaState.state = engine === 'youtube' ? 'PLAY' : 'PAUSE';
     codexCinemaState.currentTime = 0;
     codexCinemaState.lastUpdated = Date.now();
-    io.emit('codex_movie_load_broadcast', { engine, url, ytId, embedUrl });
+    io.emit('codex_movie_load_broadcast', { engine, url, ytId, embedUrl, imdbId, senderRole });
   });
 
   socket.on('codex_movie_sync', ({ state, currentTime, timestamp }) => {
