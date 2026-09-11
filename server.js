@@ -78,7 +78,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v9" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v11" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -154,7 +154,7 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // PLUGIN ARCADE GAME REQUEST & ACCEPT WORKFLOW SOCKETS
+  // REAL-TIME ARCADE & GAME STATE SOCKETS
   socket.on('admin_send_arcade_request', () => {
     socket.broadcast.emit('arcade_request_received');
   });
@@ -165,6 +165,14 @@ io.on('connection', (socket) => {
 
   socket.on('admin_toggle_arcade', (status) => {
     io.emit('toggle_arcade_plugins', status);
+  });
+
+  socket.on('launch_multiplayer_game', (gameObj) => {
+    io.emit('launch_game_session', gameObj);
+  });
+
+  socket.on('arcade_game_action', (moveData) => {
+    socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
   socket.on('sync_send_invite', ({ role }) => {
