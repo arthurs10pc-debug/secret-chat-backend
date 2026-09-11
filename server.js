@@ -47,7 +47,6 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
-// Shared Synced Audio State
 const globalSyncState = {
   connected: false,
   videoId: null,
@@ -65,7 +64,6 @@ function getAccurateSyncTime() {
   return globalSyncState.currentTime;
 }
 
-// Codex Cinema 4-Engine Shared State
 const codexCinemaState = {
   engine: 'gofile',
   url: '',
@@ -80,13 +78,12 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v8" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v9" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json([]);
-
   try {
     const url = `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodeURIComponent(query)}`;
     const response = await fetch(url);
@@ -100,40 +97,10 @@ app.get('/api/yt-suggest', async (req, res) => {
 app.get('/api/yt-search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.json({ videoId: null });
-
   const directMatch = query.match(/(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=[&?]?|v=)([a-zA-Z0-9_-]{11})/);
   if (directMatch && directMatch[1]) {
     return res.json({ videoId: directMatch[1], title: query });
   }
-
-  try {
-    const ddgUrl = `https://html.duckduckgo.com/html/?q=site:youtube.com/watch+${encodeURIComponent(query)}`;
-    const ddgRes = await fetch(ddgUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
-    const ddgText = await ddgRes.text();
-    const ddgMatch = ddgText.match(/watch%3Fv%3D([a-zA-Z0-9_-]{11})/);
-    if (ddgMatch && ddgMatch[1]) {
-      return res.json({ videoId: ddgMatch[1], title: query });
-    }
-  } catch (e) {}
-
-  try {
-    const ytUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-    const ytRes = await fetch(ytUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
-      }
-    });
-    const ytText = await ytRes.text();
-    const ytMatch = ytText.match(/\/watch\?v=([a-zA-Z0-9_-]{11})/);
-    if (ytMatch && ytMatch[1]) {
-      return res.json({ videoId: ytMatch[1], title: query });
-    }
-  } catch (e) {}
-
   res.json({ videoId: null, title: query });
 });
 
@@ -187,7 +154,15 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // ADMIN ARCADE PLUGINS TOGGLE BROADCAST
+  // PLUGIN ARCADE GAME REQUEST & ACCEPT WORKFLOW SOCKETS
+  socket.on('admin_send_arcade_request', () => {
+    socket.broadcast.emit('arcade_request_received');
+  });
+
+  socket.on('user_accept_arcade_request', () => {
+    io.emit('toggle_arcade_plugins', true);
+  });
+
   socket.on('admin_toggle_arcade', (status) => {
     io.emit('toggle_arcade_plugins', status);
   });
@@ -259,54 +234,8 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('schedule_bubble_alert', ({ room, text, time1, time2 }) => {
-    const queueItem = (timeStr) => {
-      if (!timeStr) return;
-      const targetTime = new Date(timeStr).getTime();
-      const delay = targetTime - Date.now();
-
-      if (delay > 0) {
-        const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
-        const timerId = setTimeout(() => {
-          io.to(room).emit('receive_assistant_alert', { text, timestamp: Date.now() });
-
-          const index = scheduledAlerts.findIndex(j => j.id === jobId);
-          if (index !== -1) scheduledAlerts.splice(index, 1);
-
-          const sanitized = scheduledAlerts
-            .filter(j => j.room === room)
-            .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
-          io.to(room).emit('scheduled_jobs_update', sanitized);
-        }, delay);
-
-        scheduledAlerts.push({ id: jobId, room, text, timeStr, timerId });
-      }
-    };
-
-    queueItem(time1);
-    queueItem(time2);
-
-    const sanitized = scheduledAlerts
-      .filter(j => j.room === room)
-      .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
-    io.to(room).emit('scheduled_jobs_update', sanitized);
-  });
-
-  socket.on('cancel_scheduled_job', ({ room, jobId }) => {
-    const index = scheduledAlerts.findIndex(j => j.id === jobId);
-    if (index !== -1) {
-      clearTimeout(scheduledAlerts[index].timerId);
-      scheduledAlerts.splice(index, 1);
-    }
-    const sanitized = scheduledAlerts
-      .filter(j => j.room === room)
-      .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
-    io.to(room).emit('scheduled_jobs_update', sanitized);
-  });
-
   socket.on('send_stealth_msg', async (data) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
-    
     io.emit('peer_typing_status', { isTyping: false });
 
     const newMsgData = {
@@ -338,13 +267,11 @@ io.on('connection', (socket) => {
 
   socket.on('mark_seen', async ({ room, viewerRole }) => {
     io.to(room).emit('messages_marked_seen', { viewerRole });
-
     memoryMessages.forEach(m => {
       if (m.room === room && m.senderRole !== viewerRole) {
         m.isSeen = true;
       }
     });
-
     if (mongoose.connection.readyState === 1) {
       Message.updateMany(
         { room, senderRole: { $ne: viewerRole }, isSeen: false },
@@ -355,50 +282,18 @@ io.on('connection', (socket) => {
 
   socket.on('mark_media_opened', async ({ room, messageId }) => {
     io.to(room).emit('media_marked_opened', { messageId });
-    if (mongoose.connection.readyState === 1) {
-      Message.findByIdAndUpdate(messageId, { mediaOpened: true }).catch(console.error);
-    } else {
-      const target = memoryMessages.find(m => m._id === messageId);
-      if (target) target.mediaOpened = true;
-    }
   });
 
   socket.on('destroy_view_once', async ({ room, messageId }) => {
     io.to(room).emit('message_destroyed_on_view', { messageId });
-    if (mongoose.connection.readyState === 1) {
-      Message.findByIdAndDelete(messageId).catch(console.error);
-    } else {
-      const idx = memoryMessages.findIndex(m => m._id === messageId);
-      if (idx !== -1) memoryMessages.splice(idx, 1);
-    }
   });
 
   socket.on('add_reaction', async ({ room, messageId, reaction }) => {
     io.to(room).emit('update_message_reaction', { messageId, reaction });
-    if (mongoose.connection.readyState === 1) {
-      Message.findByIdAndUpdate(messageId, { reaction }).catch(console.error);
-    } else {
-      const target = memoryMessages.find(m => m._id === messageId);
-      if (target) target.reaction = reaction;
-    }
   });
 
   socket.on('toggle_pending', async ({ messageId, status, room }) => {
     io.to(room).emit('update_msg_status', { messageId, flaggedPending: status });
-    if (mongoose.connection.readyState === 1) {
-      Message.findByIdAndUpdate(messageId, { flaggedPending: status }).catch(console.error);
-    } else {
-      const target = memoryMessages.find(m => m._id === messageId);
-      if (target) target.flaggedPending = status;
-    }
-  });
-
-  socket.on('send_assistant_alert', ({ room, text }) => {
-    io.to(room).emit('receive_assistant_alert', { text, timestamp: Date.now() });
-  });
-
-  socket.on('bubble_popped', ({ room }) => {
-    socket.to(room).emit('parent_bubble_pop_notify');
   });
 
   socket.on('disconnect', () => {
