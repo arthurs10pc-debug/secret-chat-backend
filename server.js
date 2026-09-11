@@ -187,6 +187,11 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
+  // ADMIN ARCADE PLUGINS TOGGLE BROADCAST
+  socket.on('admin_toggle_arcade', (status) => {
+    io.emit('toggle_arcade_plugins', status);
+  });
+
   socket.on('sync_send_invite', ({ role }) => {
     socket.broadcast.emit('sync_receive_invite', { fromRole: role });
   });
@@ -231,7 +236,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // CODEX 4-ENGINE MOVIE RELAY (Includes senderRole to prevent echo reload)
   socket.on('codex_movie_load', ({ engine, url, ytId, embedUrl, imdbId, senderRole }) => {
     codexCinemaState.engine = engine;
     codexCinemaState.url = url || '';
