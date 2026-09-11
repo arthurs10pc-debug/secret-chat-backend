@@ -78,7 +78,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v13" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v14" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
