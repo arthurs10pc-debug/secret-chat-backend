@@ -78,7 +78,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v11" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Sync Audio/Cinema Engine v12" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -154,7 +154,7 @@ io.on('connection', (socket) => {
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // REAL-TIME ARCADE & GAME STATE SOCKETS
+  // FIXED: ADMIN ARCADE REQUEST & SYNC SOCKET LISTENERS
   socket.on('admin_send_arcade_request', () => {
     socket.broadcast.emit('arcade_request_received');
   });
