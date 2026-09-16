@@ -78,7 +78,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v14" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Media-Sync Engine v14" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -152,27 +152,6 @@ io.on('connection', (socket) => {
   socket.on('typing_stop', (data) => {
     const role = (data && data.role) || '';
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
-  });
-
-  // MULTIPLAYER ARCADE HANDSHAKE & GAME ACTION RELAYS
-  socket.on('admin_send_arcade_request', () => {
-    socket.broadcast.emit('arcade_request_received');
-  });
-
-  socket.on('user_accept_arcade_request', () => {
-    io.emit('toggle_arcade_plugins', true);
-  });
-
-  socket.on('admin_toggle_arcade', (status) => {
-    io.emit('toggle_arcade_plugins', status);
-  });
-
-  socket.on('launch_multiplayer_game', (gameObj) => {
-    io.emit('launch_game_session', gameObj);
-  });
-
-  socket.on('arcade_game_action', (moveData) => {
-    socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
   socket.on('sync_send_invite', ({ role }) => {
