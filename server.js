@@ -78,7 +78,7 @@ const codexCinemaState = {
 const scheduledAlerts = [];
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v14" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v15" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -135,13 +135,6 @@ io.on('connection', (socket) => {
     if (codexCinemaState.url || codexCinemaState.ytId || codexCinemaState.embedUrl || codexCinemaState.engine === 'local') {
       socket.emit('codex_restore_state', codexCinemaState);
     }
-
-    if (role === 'parent') {
-      const sanitized = scheduledAlerts
-        .filter(j => j.room === room)
-        .map(({ id, text, timeStr }) => ({ id, text, timeStr }));
-      socket.emit('scheduled_jobs_update', sanitized);
-    }
   });
 
   socket.on('typing_start', (data) => {
@@ -152,6 +145,19 @@ io.on('connection', (socket) => {
   socket.on('typing_stop', (data) => {
     const role = (data && data.role) || '';
     io.emit('peer_typing_status', { isTyping: false, senderRole: role });
+  });
+
+  // REAL AUDIO CALL SOCKET RELAYS
+  socket.on('start_audio_call', ({ room, fromRole }) => {
+    socket.to(room).emit('start_audio_call', { fromRole });
+  });
+
+  socket.on('accept_audio_call', ({ room }) => {
+    socket.to(room).emit('accept_audio_call');
+  });
+
+  socket.on('end_audio_call', ({ room }) => {
+    socket.to(room).emit('end_audio_call');
   });
 
   // MULTIPLAYER ARCADE HANDSHAKE & GAME ACTION RELAYS
