@@ -75,10 +75,8 @@ const codexCinemaState = {
   lastUpdated: Date.now()
 };
 
-const scheduledAlerts = [];
-
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v16" });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v17" });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -139,15 +137,15 @@ io.on('connection', (socket) => {
 
   socket.on('typing_start', (data) => {
     const role = (data && data.role) || '';
-    io.emit('peer_typing_status', { isTyping: true, senderRole: role });
+    socket.broadcast.emit('peer_typing_status', { isTyping: true, senderRole: role });
   });
 
   socket.on('typing_stop', (data) => {
     const role = (data && data.role) || '';
-    io.emit('peer_typing_status', { isTyping: false, senderRole: role });
+    socket.broadcast.emit('peer_typing_status', { isTyping: false, senderRole: role });
   });
 
-  // REAL AUDIO CALL SOCKET RELAYS
+  // --- WEBRTC AUDIO CALL & SIGNALING RELAYS ---
   socket.on('start_audio_call', ({ room, fromRole }) => {
     socket.to(room).emit('start_audio_call', { fromRole });
   });
@@ -158,6 +156,23 @@ io.on('connection', (socket) => {
 
   socket.on('end_audio_call', ({ room }) => {
     socket.to(room).emit('end_audio_call');
+  });
+
+  socket.on('webrtc_offer', ({ room, offer }) => {
+    socket.to(room).emit('webrtc_offer', { offer });
+  });
+
+  socket.on('webrtc_answer', ({ room, answer }) => {
+    socket.to(room).emit('webrtc_answer', { answer });
+  });
+
+  socket.on('webrtc_ice_candidate', ({ room, candidate }) => {
+    socket.to(room).emit('webrtc_ice_candidate', { candidate });
+  });
+
+  // --- CODEX TOGEPI LIVE MOVIE CHAT SYNC ---
+  socket.on('togepi_movie_chat', ({ room, senderRole, text }) => {
+    io.to(room).emit('togepi_movie_chat', { senderRole, text });
   });
 
   // MULTIPLAYER ARCADE HANDSHAKE & GAME ACTION RELAYS
