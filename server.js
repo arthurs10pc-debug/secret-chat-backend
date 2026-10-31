@@ -146,33 +146,43 @@ io.on('connection', (socket) => {
   });
 
   // --- WEBRTC AUDIO CALL & SIGNALING RELAYS ---
-  socket.on('start_audio_call', ({ room, fromRole }) => {
-    socket.to(room).emit('start_audio_call', { fromRole });
+  socket.on('start_audio_call', (data) => {
+    socket.broadcast.emit('start_audio_call', data || {});
   });
 
-  socket.on('accept_audio_call', ({ room }) => {
-    socket.to(room).emit('accept_audio_call');
+  socket.on('accept_audio_call', (data) => {
+    socket.broadcast.emit('accept_audio_call', data || {});
   });
 
-  socket.on('end_audio_call', ({ room }) => {
-    socket.to(room).emit('end_audio_call');
+  socket.on('end_audio_call', (data) => {
+    socket.broadcast.emit('end_audio_call', data || {});
   });
 
-  socket.on('webrtc_offer', ({ room, offer }) => {
-    socket.to(room).emit('webrtc_offer', { offer });
+  socket.on('webrtc_offer', (data) => {
+    socket.broadcast.emit('webrtc_offer', data || {});
   });
 
-  socket.on('webrtc_answer', ({ room, answer }) => {
-    socket.to(room).emit('webrtc_answer', { answer });
+  socket.on('webrtc_answer', (data) => {
+    socket.broadcast.emit('webrtc_answer', data || {});
   });
 
-  socket.on('webrtc_ice_candidate', ({ room, candidate }) => {
-    socket.to(room).emit('webrtc_ice_candidate', { candidate });
+  socket.on('webrtc_ice_candidate', (data) => {
+    socket.broadcast.emit('webrtc_ice_candidate', data || {});
   });
 
   // --- CODEX TOGEPI LIVE MOVIE CHAT SYNC ---
-  socket.on('togepi_movie_chat', ({ room, senderRole, text }) => {
-    io.to(room).emit('togepi_movie_chat', { senderRole, text });
+  socket.on('togepi_movie_chat', (data) => {
+    io.emit('togepi_movie_chat', data || {});
+  });
+
+  // --- CODEX DELAY GAP REALIGN SYNC ---
+  socket.on('codex_force_realign', (data) => {
+    if (data) {
+      codexCinemaState.state = data.state || codexCinemaState.state;
+      codexCinemaState.currentTime = data.currentTime !== undefined ? data.currentTime : codexCinemaState.currentTime;
+      codexCinemaState.lastUpdated = data.timestamp || Date.now();
+    }
+    socket.broadcast.emit('codex_force_realign_broadcast', data || {});
   });
 
   // MULTIPLAYER ARCADE HANDSHAKE & GAME ACTION RELAYS
