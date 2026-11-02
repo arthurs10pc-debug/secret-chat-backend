@@ -206,6 +206,11 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
+  // --- REAL-TIME LOVE BALANCE & WISHES SYNC ---
+  socket.on('love_balance_action', (data) => {
+    socket.broadcast.emit('love_balance_broadcast', data || {});
+  });
+
   socket.on('sync_send_invite', ({ role }) => {
     socket.broadcast.emit('sync_receive_invite', { fromRole: role });
   });
