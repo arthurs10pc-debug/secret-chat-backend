@@ -370,7 +370,13 @@ io.on('connection', (socket) => {
       persistLoveState();
     }
 
-    socket.broadcast.emit('love_balance_broadcast', data);
+    const payload = {
+      ...data,
+      currentLoveBalance: globalLoveBalanceState.loveBalance,
+      currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      serverTimestamp: Date.now()
+    };
+    io.emit('love_balance_broadcast', payload);
   });
 
   socket.on('sync_send_invite', ({ role }) => {
