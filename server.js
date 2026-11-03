@@ -27,8 +27,49 @@ const io = new Server(server, {
 
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/stealth_chat?retryWrites=true&w=majority";
 
+const loveBalanceSchema = new mongoose.Schema({
+  key: { type: String, default: 'global_state', unique: true },
+  loveBalance: { type: Number, default: 0 },
+  adminLoveBalance: { type: Number, default: 0 },
+  loveLedger: { type: Array, default: [] },
+  wishRequests: { type: Array, default: [] }
+}, { timestamps: true });
+
+const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
+
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("Connected to MongoDB successfully."))
+  .then(async () => {
+    console.log("Connected to MongoDB successfully.");
+    try {
+      const doc = await LoveBalanceModel.findOne({ key: 'global_state' });
+      if (doc) {
+        if (typeof doc.loveBalance === 'number') {
+          globalLoveBalanceState.loveBalance = Math.max(globalLoveBalanceState.loveBalance, doc.loveBalance);
+        }
+        if (typeof doc.adminLoveBalance === 'number') {
+          globalLoveBalanceState.adminLoveBalance = Math.max(globalLoveBalanceState.adminLoveBalance, doc.adminLoveBalance);
+        }
+        if (Array.isArray(doc.loveLedger) && doc.loveLedger.length > 0) {
+          const merged = [...doc.loveLedger];
+          for (const item of (globalLoveBalanceState.loveLedger || [])) {
+            if (!merged.some(m => m && m.id === item.id)) merged.push(item);
+          }
+          globalLoveBalanceState.loveLedger = merged;
+        }
+        if (Array.isArray(doc.wishRequests) && doc.wishRequests.length > 0) {
+          const mergedWishes = [...doc.wishRequests];
+          for (const r of (globalLoveBalanceState.wishRequests || [])) {
+            if (!mergedWishes.some(w => w && w.id === r.id)) mergedWishes.push(r);
+          }
+          globalLoveBalanceState.wishRequests = mergedWishes;
+        }
+        persistLoveState();
+        console.log("Synchronized Love Balance from MongoDB: Dora ₹", globalLoveBalanceState.loveBalance, "| Darsh ₹", globalLoveBalanceState.adminLoveBalance);
+      }
+    } catch (err) {
+      console.warn("Error reading Love Balance from MongoDB:", err);
+    }
+  })
   .catch((err) => console.log("MongoDB connection fallback to memory:", err.message));
 
 const messageSchema = new mongoose.Schema({
@@ -106,6 +147,22 @@ function persistLoveState() {
     fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
   } catch (e) {
     console.warn('Could not write love_balance_state.json:', e);
+  }
+  try {
+    if (mongoose.connection.readyState === 1) {
+      LoveBalanceModel.findOneAndUpdate(
+        { key: 'global_state' },
+        {
+          loveBalance: globalLoveBalanceState.loveBalance,
+          adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          loveLedger: globalLoveBalanceState.loveLedger,
+          wishRequests: globalLoveBalanceState.wishRequests
+        },
+        { upsert: true, new: true }
+      ).catch(err => console.warn('Could not save Love Balance to MongoDB:', err));
+    }
+  } catch (err) {
+    console.warn('MongoDB save exception:', err);
   }
 }
 
