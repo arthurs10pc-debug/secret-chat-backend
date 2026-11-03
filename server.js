@@ -137,10 +137,30 @@ app.get('/api/yt-search', async (req, res) => {
   res.json({ videoId: null, title: query });
 });
 
+// --- REAL-TIME USER PRESENCE TRACKING ---
+const activeRoomUsers = new Map(); // socket.id -> { room, role, isForeground: true }
+
+function broadcastPresence(room) {
+  if (!room) return;
+  const onlineRoles = new Set();
+  for (const [sId, info] of activeRoomUsers.entries()) {
+    if (info.room === room && info.isForeground !== false) {
+      onlineRoles.add(info.role);
+    }
+  }
+  io.to(room).emit('presence_status', {
+    onlineRoles: Array.from(onlineRoles),
+    timestamp: Date.now()
+  });
+}
+
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
     socket.roomName = room;
+    socket.role = role;
+    activeRoomUsers.set(socket.id, { room, role, isForeground: true });
+    broadcastPresence(room);
 
     try {
       let history = [];
@@ -449,7 +469,22 @@ io.on('connection', (socket) => {
     io.to(room).emit('update_msg_status', { messageId, flaggedPending: status });
   });
 
+  socket.on('presence_visibility', ({ room, role, isForeground }) => {
+    const targetRoom = room || socket.roomName;
+    if (!targetRoom) return;
+    if (activeRoomUsers.has(socket.id)) {
+      activeRoomUsers.get(socket.id).isForeground = isForeground;
+    } else {
+      activeRoomUsers.set(socket.id, { room: targetRoom, role: role || socket.role, isForeground });
+    }
+    broadcastPresence(targetRoom);
+  });
+
   socket.on('disconnect', () => {
+    activeRoomUsers.delete(socket.id);
+    if (socket.roomName) {
+      broadcastPresence(socket.roomName);
+    }
     io.emit('peer_typing_status', { isTyping: false });
   });
 });
