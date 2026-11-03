@@ -64,6 +64,41 @@ function getAccurateSyncTime() {
   return globalSyncState.currentTime;
 }
 
+// --- REAL-TIME SERVER-SIDE LOVE BALANCE & WISHES PERSISTENCE ---
+const LOVE_STATE_FILE = path.join(__dirname, 'love_balance_state.json');
+
+let globalLoveBalanceState = {
+  loveBalance: 0,
+  adminLoveBalance: 0,
+  loveLedger: [],
+  wishRequests: []
+};
+
+try {
+  if (fs.existsSync(LOVE_STATE_FILE)) {
+    const raw = fs.readFileSync(LOVE_STATE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      globalLoveBalanceState = {
+        loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
+        adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
+        loveLedger: Array.isArray(parsed.loveLedger) ? parsed.loveLedger : [],
+        wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : []
+      };
+    }
+  }
+} catch (e) {
+  console.warn('Could not read love_balance_state.json:', e);
+}
+
+function persistLoveState() {
+  try {
+    fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
+  } catch (e) {
+    console.warn('Could not write love_balance_state.json:', e);
+  }
+}
+
 const codexCinemaState = {
   engine: 'gofile',
   url: '',
@@ -133,6 +168,15 @@ io.on('connection', (socket) => {
     if (codexCinemaState.url || codexCinemaState.ytId || codexCinemaState.embedUrl || codexCinemaState.engine === 'local') {
       socket.emit('codex_restore_state', codexCinemaState);
     }
+
+    // Sync Love Balance real-time state to newly connected client
+    socket.emit('love_balance_broadcast', {
+      action: 'SYNC_STATE_RESPONSE',
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger,
+      wishRequests: globalLoveBalanceState.wishRequests
+    });
   });
 
   socket.on('typing_start', (data) => {
@@ -208,7 +252,72 @@ io.on('connection', (socket) => {
 
   // --- REAL-TIME LOVE BALANCE & WISHES SYNC ---
   socket.on('love_balance_action', (data) => {
-    socket.broadcast.emit('love_balance_broadcast', data || {});
+    if (!data) return;
+
+    if (data.action === 'CLEAR_LEDGER') {
+      const target = data.target || 'user';
+      if (target === 'user') {
+        globalLoveBalanceState.loveBalance = 0;
+        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'user');
+      } else if (target === 'admin') {
+        globalLoveBalanceState.adminLoveBalance = 0;
+        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin');
+      } else {
+        globalLoveBalanceState.loveBalance = 0;
+        globalLoveBalanceState.adminLoveBalance = 0;
+        globalLoveBalanceState.loveLedger = [];
+      }
+      persistLoveState();
+    } else if (data.action === 'TRANSACTION') {
+      const numAmount = Math.abs(parseFloat(data.amount) || 0);
+      const delta = data.type === 'credit' ? numAmount : -numAmount;
+      if (data.target === 'admin') {
+        globalLoveBalanceState.adminLoveBalance = Math.max(0, parseFloat((globalLoveBalanceState.adminLoveBalance + delta).toFixed(2)));
+      } else {
+        globalLoveBalanceState.loveBalance = Math.max(0, parseFloat((globalLoveBalanceState.loveBalance + delta).toFixed(2)));
+      }
+      if (data.newEntry) {
+        globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
+      }
+      persistLoveState();
+    } else if (data.action === 'OVERRIDE_BALANCE') {
+      const val = Math.max(0, parseFloat(data.newBalance) || 0);
+      if (data.target === 'admin') {
+        globalLoveBalanceState.adminLoveBalance = val;
+      } else {
+        globalLoveBalanceState.loveBalance = val;
+      }
+      persistLoveState();
+    } else if (data.action === 'REQUEST_SYNC') {
+      socket.emit('love_balance_broadcast', {
+        action: 'SYNC_STATE_RESPONSE',
+        loveBalance: globalLoveBalanceState.loveBalance,
+        adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        wishRequests: globalLoveBalanceState.wishRequests
+      });
+      return;
+    } else if (data.action === 'WISH_REQUEST' && data.wishRequest) {
+      globalLoveBalanceState.wishRequests = [data.wishRequest, ...globalLoveBalanceState.wishRequests.filter(r => r.id !== data.wishRequest.id)];
+      persistLoveState();
+    } else if (data.action === 'WISH_APPROVED' && data.wishRequest) {
+      globalLoveBalanceState.wishRequests = globalLoveBalanceState.wishRequests.map(r => r.id === data.wishRequest.id ? { ...r, status: 'APPROVED' } : r);
+      persistLoveState();
+    } else if (data.action === 'WISH_DECLINED' && data.wishRequest) {
+      globalLoveBalanceState.wishRequests = globalLoveBalanceState.wishRequests.map(r => r.id === data.wishRequest.id ? { ...r, status: 'DECLINED' } : r);
+      persistLoveState();
+    } else if (data.action === 'TOGGLE_FULFILLMENT') {
+      globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.map(item => {
+        if (item.id === data.wishId) {
+          const nextStatus = item.fulfillmentStatus === 'Fulfilled' ? 'Pending' : 'Fulfilled';
+          return { ...item, fulfillmentStatus: nextStatus };
+        }
+        return item;
+      });
+      persistLoveState();
+    }
+
+    socket.broadcast.emit('love_balance_broadcast', data);
   });
 
   socket.on('sync_send_invite', ({ role }) => {
