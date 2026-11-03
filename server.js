@@ -82,7 +82,17 @@ try {
       globalLoveBalanceState = {
         loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
         adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
-        loveLedger: Array.isArray(parsed.loveLedger) ? parsed.loveLedger : [],
+        loveLedger: Array.isArray(parsed.loveLedger) 
+          ? parsed.loveLedger.filter(item => {
+              if (!item) return false;
+              if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
+              if (item.description && (
+                item.description.includes('Announcement Read') ||
+                item.description.includes('Monthly Punctuality Reward')
+              )) return false;
+              return true;
+            })
+          : [],
         wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : []
       };
     }
@@ -138,28 +148,51 @@ app.get('/api/yt-search', async (req, res) => {
 });
 
 // --- REAL-TIME USER PRESENCE TRACKING ---
-const activeRoomUsers = new Map(); // socket.id -> { room, role, isForeground: true }
+const activeRoomUsers = new Map(); // socket.id -> { room, role, isForeground: true, lastHeartbeat: timestamp }
 
 function broadcastPresence(room) {
-  if (!room) return;
+  const targetRoom = room || 'stealth_master_room';
   const onlineRoles = new Set();
+  const now = Date.now();
   for (const [sId, info] of activeRoomUsers.entries()) {
-    if (info.room === room && info.isForeground !== false) {
-      onlineRoles.add(info.role);
+    if (info.isForeground !== false && (now - (info.lastHeartbeat || now)) < 25000) {
+      if (info.role) onlineRoles.add(info.role);
     }
   }
-  io.to(room).emit('presence_status', {
+  const payload = {
     onlineRoles: Array.from(onlineRoles),
-    timestamp: Date.now()
-  });
+    timestamp: now
+  };
+  io.to(targetRoom).emit('presence_status', payload);
+  io.emit('presence_status', payload);
 }
+
+// Clean up dead/stale connections every 8 seconds
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [sId, info] of activeRoomUsers.entries()) {
+    if (now - (info.lastHeartbeat || now) > 25000) {
+      activeRoomUsers.delete(sId);
+      changed = true;
+    }
+  }
+  if (changed) {
+    broadcastPresence('stealth_master_room');
+  }
+}, 8000);
 
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
     socket.roomName = room;
-    socket.role = role;
-    activeRoomUsers.set(socket.id, { room, role, isForeground: true });
+    socket.role = role || 'user';
+    activeRoomUsers.set(socket.id, { 
+      room, 
+      role: socket.role, 
+      isForeground: true, 
+      lastHeartbeat: Date.now() 
+    });
     broadcastPresence(room);
 
     try {
@@ -278,10 +311,10 @@ io.on('connection', (socket) => {
       const target = data.target || 'user';
       if (target === 'user') {
         globalLoveBalanceState.loveBalance = 0;
-        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'user');
+        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target === 'admin' || (item.description && item.description.includes('[Darsh]')));
       } else if (target === 'admin') {
         globalLoveBalanceState.adminLoveBalance = 0;
-        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin');
+        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
       } else {
         globalLoveBalanceState.loveBalance = 0;
         globalLoveBalanceState.adminLoveBalance = 0;
@@ -470,13 +503,32 @@ io.on('connection', (socket) => {
   });
 
   socket.on('presence_visibility', ({ room, role, isForeground }) => {
-    const targetRoom = room || socket.roomName;
-    if (!targetRoom) return;
+    const targetRoom = room || socket.roomName || 'stealth_master_room';
     if (activeRoomUsers.has(socket.id)) {
-      activeRoomUsers.get(socket.id).isForeground = isForeground;
+      const entry = activeRoomUsers.get(socket.id);
+      entry.isForeground = isForeground !== false;
+      entry.lastHeartbeat = Date.now();
     } else {
-      activeRoomUsers.set(socket.id, { room: targetRoom, role: role || socket.role, isForeground });
+      activeRoomUsers.set(socket.id, { 
+        room: targetRoom, 
+        role: role || socket.role || 'user', 
+        isForeground: isForeground !== false,
+        lastHeartbeat: Date.now() 
+      });
     }
+    broadcastPresence(targetRoom);
+  });
+
+  socket.on('presence_ping', ({ room, role, isForeground }) => {
+    const targetRoom = room || socket.roomName || 'stealth_master_room';
+    socket.role = role || socket.role || 'user';
+    socket.roomName = targetRoom;
+    activeRoomUsers.set(socket.id, {
+      room: targetRoom,
+      role: socket.role,
+      isForeground: isForeground !== false,
+      lastHeartbeat: Date.now()
+    });
     broadcastPresence(targetRoom);
   });
 
