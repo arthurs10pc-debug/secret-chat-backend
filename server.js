@@ -483,12 +483,49 @@ io.on('connection', (socket) => {
       }
       persistLoveState();
     } else if (data.action === 'REQUEST_SYNC') {
+      // Adopt client balance & data if server is currently 0 / empty (e.g. after cloud server reboot)
+      if (typeof data.clientLoveBalance === 'number' && globalLoveBalanceState.loveBalance === 0 && data.clientLoveBalance !== 0) {
+        globalLoveBalanceState.loveBalance = data.clientLoveBalance;
+      }
+      if (typeof data.clientAdminLoveBalance === 'number' && globalLoveBalanceState.adminLoveBalance === 0 && data.clientAdminLoveBalance !== 0) {
+        globalLoveBalanceState.adminLoveBalance = data.clientAdminLoveBalance;
+      }
+      if (Array.isArray(data.clientLoveLedger) && data.clientLoveLedger.length > 0) {
+        const merged = [...(globalLoveBalanceState.loveLedger || [])];
+        for (const item of data.clientLoveLedger) {
+          if (item && item.id && !merged.some(m => m && m.id === item.id)) merged.push(item);
+        }
+        globalLoveBalanceState.loveLedger = merged;
+      }
+      if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
+        const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
+        for (const w of data.clientWishRequests) {
+          if (w && w.id && !mergedW.some(m => m && m.id === w.id)) mergedW.push(w);
+        }
+        globalLoveBalanceState.wishRequests = mergedW;
+      }
+      if (Array.isArray(data.clientSubmissions) && data.clientSubmissions.length > 0) {
+        for (const sub of data.clientSubmissions) {
+          if (sub && sub.id) {
+            const idx = memoryDailySubmissions.findIndex(s => s.id === sub.id);
+            if (idx >= 0) memoryDailySubmissions[idx] = sub;
+            else memoryDailySubmissions.push(sub);
+          }
+        }
+      }
+      if (Array.isArray(data.clientSlots) && data.clientSlots.length > 0) {
+        memoryDailySlots = data.clientSlots;
+      }
+      persistLoveState();
+
       socket.emit('love_balance_broadcast', {
         action: 'SYNC_STATE_RESPONSE',
         loveBalance: globalLoveBalanceState.loveBalance,
         adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
         loveLedger: globalLoveBalanceState.loveLedger,
-        wishRequests: globalLoveBalanceState.wishRequests
+        wishRequests: globalLoveBalanceState.wishRequests,
+        dailySubmissions: memoryDailySubmissions,
+        dailySlots: memoryDailySlots && memoryDailySlots.length > 0 ? memoryDailySlots : DEFAULT_DAILY_SLOTS
       });
       return;
     } else if (data.action === 'DAILY_TASK_SUBMIT' && data.submission) {
@@ -499,11 +536,21 @@ io.on('connection', (socket) => {
           sub,
           { upsert: true, new: true }
         ).catch(err => console.error('Error saving DAILY_TASK_SUBMIT in Mongo:', err));
-      } else {
-        const idx = memoryDailySubmissions.findIndex(s => s.id === sub.id);
-        if (idx >= 0) memoryDailySubmissions[idx] = sub;
-        else memoryDailySubmissions.push(sub);
       }
+      const idx = memoryDailySubmissions.findIndex(s => s.id === sub.id);
+      if (idx >= 0) memoryDailySubmissions[idx] = sub;
+      else memoryDailySubmissions.push(sub);
+      
+      // Also broadcast daily_task_submission_updated and admin alert
+      io.emit('daily_task_submission_updated', { submission: sub, isNew: true });
+      io.emit('daily_task_admin_alert', {
+        slotId: sub.slotId,
+        slotTitle: sub.slotTitle || 'Routine Task',
+        date: sub.date,
+        note: sub.note || '',
+        hasImage: Boolean(sub.image),
+        timestamp: Date.now()
+      });
     } else if (data.action === 'DAILY_TASK_APPROVED' && data.submissionId) {
       const pts = parseFloat(data.points) || 0;
       if (mongoose.connection.readyState === 1) {
@@ -512,14 +559,14 @@ io.on('connection', (socket) => {
           { status: 'APPROVED', pointsAwarded: pts, reviewedAt: new Date() },
           { new: true }
         ).catch(err => console.error('Error approving DAILY_TASK in Mongo:', err));
-      } else {
-        const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
-        if (item) {
-          item.status = 'APPROVED';
-          item.pointsAwarded = pts;
-          item.reviewedAt = new Date();
-        }
       }
+      const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
+      if (item) {
+        item.status = 'APPROVED';
+        item.pointsAwarded = pts;
+        item.reviewedAt = new Date();
+      }
+      io.emit('daily_task_submission_updated', { submission: item, approved: true, pointsAwarded: pts });
     } else if (data.action === 'DAILY_TASK_REJECTED' && data.submissionId) {
       if (mongoose.connection.readyState === 1) {
         DailyTaskSubmission.findOneAndUpdate(
@@ -527,14 +574,38 @@ io.on('connection', (socket) => {
           { status: 'REJECTED', adminFeedback: data.feedback || '', reviewedAt: new Date() },
           { new: true }
         ).catch(err => console.error('Error rejecting DAILY_TASK in Mongo:', err));
-      } else {
-        const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
-        if (item) {
-          item.status = 'REJECTED';
-          item.adminFeedback = data.feedback || '';
-          item.reviewedAt = new Date();
+      }
+      const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
+      if (item) {
+        item.status = 'REJECTED';
+        item.adminFeedback = data.feedback || '';
+        item.reviewedAt = new Date();
+      }
+      io.emit('daily_task_submission_updated', { submission: item, rejected: true, feedback: data.feedback });
+    } else if (data.action === 'DAILY_SLOT_DELETE' && data.slotId) {
+      memoryDailySlots = memoryDailySlots.filter(s => s.id !== data.slotId);
+      if (mongoose.connection.readyState === 1) {
+        DailyTaskSlot.deleteOne({ id: data.slotId }).catch(() => {});
+      }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+    } else if (data.action === 'DAILY_SLOT_UPDATE' && data.slotId) {
+      const idx = memoryDailySlots.findIndex(s => s.id === data.slotId);
+      if (idx >= 0) {
+        memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...data.updates };
+        if (mongoose.connection.readyState === 1) {
+          DailyTaskSlot.findOneAndUpdate({ id: data.slotId }, data.updates).catch(() => {});
         }
       }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+    } else if (data.action === 'DAILY_SLOT_CREATE' && data.slot) {
+      const exists = memoryDailySlots.some(s => s.id === data.slot.id);
+      if (!exists) {
+        memoryDailySlots.push(data.slot);
+        if (mongoose.connection.readyState === 1) {
+          DailyTaskSlot.create(data.slot).catch(() => {});
+        }
+      }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
     } else if (data.action === 'WISH_REQUEST' && data.wishRequest) {
       globalLoveBalanceState.wishRequests = [data.wishRequest, ...globalLoveBalanceState.wishRequests.filter(r => r.id !== data.wishRequest.id)];
       persistLoveState();
@@ -568,19 +639,31 @@ io.on('connection', (socket) => {
   socket.on('daily_task_request_sync', async ({ date }) => {
     try {
       const targetDate = date || new Date().toISOString().split('T')[0];
-      let slots = [];
-      let submissions = [];
+      let slots = memoryDailySlots && memoryDailySlots.length > 0 ? memoryDailySlots : DEFAULT_DAILY_SLOTS;
+      let submissions = [...memoryDailySubmissions];
 
       if (mongoose.connection.readyState === 1) {
-        slots = await DailyTaskSlot.find().sort({ order: 1, createdAt: 1 }).lean();
-        if (slots.length === 0) {
-          await DailyTaskSlot.insertMany(DEFAULT_DAILY_SLOTS);
-          slots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
+        try {
+          const dbSlots = await DailyTaskSlot.find().sort({ order: 1, createdAt: 1 }).lean();
+          if (dbSlots && dbSlots.length > 0) {
+            slots = dbSlots;
+            memoryDailySlots = dbSlots;
+          } else {
+            await DailyTaskSlot.insertMany(DEFAULT_DAILY_SLOTS);
+          }
+          const dbSubs = await DailyTaskSubmission.find({
+            $or: [{ date: targetDate }, { status: 'PENDING' }]
+          }).sort({ submittedAt: -1 }).limit(100).lean();
+          if (Array.isArray(dbSubs) && dbSubs.length > 0) {
+            for (const sub of dbSubs) {
+              const idx = submissions.findIndex(s => s.id === sub.id);
+              if (idx >= 0) submissions[idx] = sub;
+              else submissions.push(sub);
+            }
+          }
+        } catch (dbErr) {
+          console.warn("MongoDB sync fallback to memoryDailySubmissions:", dbErr.message);
         }
-        submissions = await DailyTaskSubmission.find({ date: targetDate }).lean();
-      } else {
-        slots = memoryDailySlots;
-        submissions = memoryDailySubmissions.filter(s => s.date === targetDate);
       }
 
       socket.emit('daily_task_sync_response', {
@@ -615,19 +698,19 @@ io.on('connection', (socket) => {
         adminFeedback: ''
       };
 
+      const idx = memoryDailySubmissions.findIndex(s => s.id === submissionId);
+      if (idx >= 0) {
+        memoryDailySubmissions[idx] = submissionData;
+      } else {
+        memoryDailySubmissions.push(submissionData);
+      }
+
       if (mongoose.connection.readyState === 1) {
-        await DailyTaskSubmission.findOneAndUpdate(
+        DailyTaskSubmission.findOneAndUpdate(
           { id: submissionId },
           submissionData,
           { upsert: true, new: true }
-        );
-      } else {
-        const idx = memoryDailySubmissions.findIndex(s => s.id === submissionId);
-        if (idx >= 0) {
-          memoryDailySubmissions[idx] = submissionData;
-        } else {
-          memoryDailySubmissions.push(submissionData);
-        }
+        ).catch(err => console.warn("Mongo save warning:", err.message));
       }
 
       // Broadcast updated submission so both Dora and Darsh see it immediately
@@ -757,23 +840,22 @@ io.on('connection', (socket) => {
   socket.on('daily_slot_create', async (slotData) => {
     try {
       const newSlot = {
-        id: 'slot_' + Date.now(),
+        id: slotData.id || ('slot_' + Date.now()),
         title: slotData.title || 'New Routine Task',
         timeRange: slotData.timeRange || '09:00 - 10:00',
         tag: slotData.tag || 'Task',
         rewardPoints: parseFloat(slotData.rewardPoints) || 1.0,
-        order: parseInt(slotData.order) || 99,
+        order: parseInt(slotData.order) || (memoryDailySlots.length + 1),
         isActive: true
       };
 
+      const exists = memoryDailySlots.some(s => s.id === newSlot.id);
+      if (!exists) memoryDailySlots.push(newSlot);
+
       if (mongoose.connection.readyState === 1) {
-        await DailyTaskSlot.create(newSlot);
-        const allSlots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
-        io.emit('daily_slots_updated', { slots: allSlots });
-      } else {
-        memoryDailySlots.push(newSlot);
-        io.emit('daily_slots_updated', { slots: memoryDailySlots });
+        DailyTaskSlot.create(newSlot).catch(() => {});
       }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
     } catch (err) {
       console.error('Error in daily_slot_create:', err);
     }
@@ -782,17 +864,14 @@ io.on('connection', (socket) => {
   socket.on('daily_slot_update', async ({ slotId, updates }) => {
     try {
       if (!slotId) return;
-      if (mongoose.connection.readyState === 1) {
-        await DailyTaskSlot.findOneAndUpdate({ id: slotId }, updates, { new: true });
-        const allSlots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
-        io.emit('daily_slots_updated', { slots: allSlots });
-      } else {
-        const idx = memoryDailySlots.findIndex(s => s.id === slotId);
-        if (idx >= 0) {
-          memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...updates };
-        }
-        io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      const idx = memoryDailySlots.findIndex(s => s.id === slotId);
+      if (idx >= 0) {
+        memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...updates };
       }
+      if (mongoose.connection.readyState === 1) {
+        DailyTaskSlot.findOneAndUpdate({ id: slotId }, updates, { new: true }).catch(() => {});
+      }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
     } catch (err) {
       console.error('Error in daily_slot_update:', err);
     }
@@ -801,14 +880,11 @@ io.on('connection', (socket) => {
   socket.on('daily_slot_delete', async ({ slotId }) => {
     try {
       if (!slotId) return;
+      memoryDailySlots = memoryDailySlots.filter(s => s.id !== slotId);
       if (mongoose.connection.readyState === 1) {
-        await DailyTaskSlot.deleteOne({ id: slotId });
-        const allSlots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
-        io.emit('daily_slots_updated', { slots: allSlots });
-      } else {
-        memoryDailySlots = memoryDailySlots.filter(s => s.id !== slotId);
-        io.emit('daily_slots_updated', { slots: memoryDailySlots });
+        DailyTaskSlot.deleteOne({ id: slotId }).catch(() => {});
       }
+      io.emit('daily_slots_updated', { slots: memoryDailySlots });
     } catch (err) {
       console.error('Error in daily_slot_delete:', err);
     }
