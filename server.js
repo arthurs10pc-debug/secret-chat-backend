@@ -44,10 +44,10 @@ mongoose.connect(MONGO_URI)
       const doc = await LoveBalanceModel.findOne({ key: 'global_state' });
       if (doc) {
         if (typeof doc.loveBalance === 'number') {
-          globalLoveBalanceState.loveBalance = Math.max(globalLoveBalanceState.loveBalance, doc.loveBalance);
+          globalLoveBalanceState.loveBalance = doc.loveBalance;
         }
         if (typeof doc.adminLoveBalance === 'number') {
-          globalLoveBalanceState.adminLoveBalance = Math.max(globalLoveBalanceState.adminLoveBalance, doc.adminLoveBalance);
+          globalLoveBalanceState.adminLoveBalance = doc.adminLoveBalance;
         }
         if (Array.isArray(doc.loveLedger) && doc.loveLedger.length > 0) {
           const merged = [...doc.loveLedger];
@@ -466,16 +466,16 @@ io.on('connection', (socket) => {
       const numAmount = Math.abs(parseFloat(data.amount) || 0);
       const delta = data.type === 'credit' ? numAmount : -numAmount;
       if (data.target === 'admin') {
-        globalLoveBalanceState.adminLoveBalance = Math.max(0, parseFloat((globalLoveBalanceState.adminLoveBalance + delta).toFixed(2)));
+        globalLoveBalanceState.adminLoveBalance = parseFloat((globalLoveBalanceState.adminLoveBalance + delta).toFixed(2));
       } else {
-        globalLoveBalanceState.loveBalance = Math.max(0, parseFloat((globalLoveBalanceState.loveBalance + delta).toFixed(2)));
+        globalLoveBalanceState.loveBalance = parseFloat((globalLoveBalanceState.loveBalance + delta).toFixed(2));
       }
       if (data.newEntry) {
         globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
       }
       persistLoveState();
     } else if (data.action === 'OVERRIDE_BALANCE') {
-      const val = Math.max(0, parseFloat(data.newBalance) || 0);
+      const val = parseFloat(data.newBalance) || 0;
       if (data.target === 'admin') {
         globalLoveBalanceState.adminLoveBalance = val;
       } else {
@@ -491,6 +491,50 @@ io.on('connection', (socket) => {
         wishRequests: globalLoveBalanceState.wishRequests
       });
       return;
+    } else if (data.action === 'DAILY_TASK_SUBMIT' && data.submission) {
+      const sub = data.submission;
+      if (mongoose.connection.readyState === 1) {
+        DailyTaskSubmission.findOneAndUpdate(
+          { id: sub.id },
+          sub,
+          { upsert: true, new: true }
+        ).catch(err => console.error('Error saving DAILY_TASK_SUBMIT in Mongo:', err));
+      } else {
+        const idx = memoryDailySubmissions.findIndex(s => s.id === sub.id);
+        if (idx >= 0) memoryDailySubmissions[idx] = sub;
+        else memoryDailySubmissions.push(sub);
+      }
+    } else if (data.action === 'DAILY_TASK_APPROVED' && data.submissionId) {
+      const pts = parseFloat(data.points) || 0;
+      if (mongoose.connection.readyState === 1) {
+        DailyTaskSubmission.findOneAndUpdate(
+          { id: data.submissionId },
+          { status: 'APPROVED', pointsAwarded: pts, reviewedAt: new Date() },
+          { new: true }
+        ).catch(err => console.error('Error approving DAILY_TASK in Mongo:', err));
+      } else {
+        const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
+        if (item) {
+          item.status = 'APPROVED';
+          item.pointsAwarded = pts;
+          item.reviewedAt = new Date();
+        }
+      }
+    } else if (data.action === 'DAILY_TASK_REJECTED' && data.submissionId) {
+      if (mongoose.connection.readyState === 1) {
+        DailyTaskSubmission.findOneAndUpdate(
+          { id: data.submissionId },
+          { status: 'REJECTED', adminFeedback: data.feedback || '', reviewedAt: new Date() },
+          { new: true }
+        ).catch(err => console.error('Error rejecting DAILY_TASK in Mongo:', err));
+      } else {
+        const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
+        if (item) {
+          item.status = 'REJECTED';
+          item.adminFeedback = data.feedback || '';
+          item.reviewedAt = new Date();
+        }
+      }
     } else if (data.action === 'WISH_REQUEST' && data.wishRequest) {
       globalLoveBalanceState.wishRequests = [data.wishRequest, ...globalLoveBalanceState.wishRequests.filter(r => r.id !== data.wishRequest.id)];
       persistLoveState();
