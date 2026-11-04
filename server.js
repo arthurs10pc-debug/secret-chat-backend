@@ -552,6 +552,7 @@ io.on('connection', (socket) => {
   socket.on('daily_task_submit', async (data) => {
     try {
       const { date, slotId, note, image, userRole, slotTitle } = data || {};
+      if (userRole === 'parent') return; // Tasks are strictly for Dora to submit; Darsh only reviews & approves
       if (!slotId) return;
       const targetDate = date || new Date().toISOString().split('T')[0];
       const submissionId = 'sub_' + targetDate + '_' + slotId;
