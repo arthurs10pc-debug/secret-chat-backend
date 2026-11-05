@@ -344,6 +344,8 @@ io.on('connection', (socket) => {
       action: 'SYNC_STATE_RESPONSE',
       loveBalance: globalLoveBalanceState.loveBalance,
       adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      currentLoveBalance: globalLoveBalanceState.loveBalance,
+      currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
       loveLedger: globalLoveBalanceState.loveLedger,
       wishRequests: globalLoveBalanceState.wishRequests
     });
@@ -551,22 +553,42 @@ io.on('connection', (socket) => {
         hasImage: Boolean(sub.image),
         timestamp: Date.now()
       });
-    } else if (data.action === 'DAILY_TASK_APPROVED' && data.submissionId) {
+    } else if (data.action === 'DAILY_TASK_APPROVED' && (data.submissionId || data.slotId)) {
       const pts = parseFloat(data.points) || 0;
+      let dbSub = null;
       if (mongoose.connection.readyState === 1) {
+        const query = data.submissionId ? { id: data.submissionId } : { slotId: data.slotId, date: data.date };
         DailyTaskSubmission.findOneAndUpdate(
-          { id: data.submissionId },
-          { status: 'APPROVED', pointsAwarded: pts, reviewedAt: new Date() },
+          query,
+          { status: 'APPROVED', pointsAwarded: pts, reviewedAt: new Date(), adminFeedback: 'Approved by Darsh' },
           { new: true }
-        ).catch(err => console.error('Error approving DAILY_TASK in Mongo:', err));
+        ).then(doc => { if (doc) dbSub = doc.toObject(); }).catch(err => console.error('Error approving DAILY_TASK in Mongo:', err));
       }
-      const item = memoryDailySubmissions.find(s => s.id === data.submissionId);
+      let item = memoryDailySubmissions.find(s => (data.submissionId && s.id === data.submissionId) || (data.slotId && s.slotId === data.slotId && (!data.date || s.date === data.date)));
       if (item) {
         item.status = 'APPROVED';
         item.pointsAwarded = pts;
         item.reviewedAt = new Date();
+        item.adminFeedback = 'Approved by Darsh';
+      } else {
+        item = {
+          id: data.submissionId || `sub_${data.date || new Date().toISOString().split('T')[0]}_${data.slotId}`,
+          slotId: data.slotId || '',
+          date: data.date || new Date().toISOString().split('T')[0],
+          status: 'APPROVED',
+          pointsAwarded: pts,
+          reviewedAt: new Date(),
+          adminFeedback: 'Approved by Darsh'
+        };
+        memoryDailySubmissions.push(item);
       }
-      io.emit('daily_task_submission_updated', { submission: item, approved: true, pointsAwarded: pts });
+      io.emit('daily_task_submission_updated', {
+        submission: item || dbSub,
+        submissionId: data.submissionId || (item && item.id),
+        approved: true,
+        pointsAwarded: pts,
+        slotTitle: data.slotTitle || 'Routine Task'
+      });
     } else if (data.action === 'DAILY_TASK_REJECTED' && data.submissionId) {
       if (mongoose.connection.readyState === 1) {
         DailyTaskSubmission.findOneAndUpdate(
@@ -733,32 +755,46 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('daily_task_approve', async ({ submissionId, points, feedback, slotTitle }) => {
+  socket.on('daily_task_approve', async ({ submissionId, slotId, date, points, feedback, slotTitle }) => {
     try {
-      if (!submissionId) return;
+      if (!submissionId && !slotId) return;
       const pts = parseFloat(points) || 0;
       let updatedSubmission = null;
 
       if (mongoose.connection.readyState === 1) {
+        const query = submissionId ? { id: submissionId } : { slotId: slotId, date: date };
         updatedSubmission = await DailyTaskSubmission.findOneAndUpdate(
-          { id: submissionId },
+          query,
           {
             status: 'APPROVED',
             pointsAwarded: pts,
             reviewedAt: new Date(),
-            adminFeedback: feedback || ''
+            adminFeedback: feedback || 'Approved by Darsh'
           },
           { new: true }
         ).lean();
-      } else {
-        const sub = memoryDailySubmissions.find(s => s.id === submissionId);
-        if (sub) {
-          sub.status = 'APPROVED';
-          sub.pointsAwarded = pts;
-          sub.reviewedAt = new Date();
-          sub.adminFeedback = feedback || '';
-          updatedSubmission = sub;
-        }
+      }
+
+      const memSub = memoryDailySubmissions.find(s => (submissionId && s.id === submissionId) || (slotId && s.slotId === slotId && (!date || s.date === date)));
+      if (memSub) {
+        memSub.status = 'APPROVED';
+        memSub.pointsAwarded = pts;
+        memSub.reviewedAt = new Date();
+        memSub.adminFeedback = feedback || 'Approved by Darsh';
+        if (!updatedSubmission) updatedSubmission = { ...memSub };
+      }
+
+      if (!updatedSubmission) {
+        updatedSubmission = {
+          id: submissionId || `sub_${date || new Date().toISOString().split('T')[0]}_${slotId}`,
+          slotId: slotId || '',
+          date: date || new Date().toISOString().split('T')[0],
+          status: 'APPROVED',
+          pointsAwarded: pts,
+          reviewedAt: new Date(),
+          adminFeedback: feedback || 'Approved by Darsh'
+        };
+        memoryDailySubmissions.push(updatedSubmission);
       }
 
       // Award Love Balance points to Dora
@@ -768,7 +804,7 @@ io.on('connection', (socket) => {
           id: 'lb_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
           sl: 1,
           target: 'user',
-          description: '[Dora] Approved Task: ' + (slotTitle || 'Daily Routine Task'),
+          description: '[Dora] Approved Task: ' + (slotTitle || updatedSubmission.slotTitle || 'Daily Routine Task'),
           earnedAt: new Date().toLocaleString('en-GB'),
           expireDate: '',
           points: pts,
@@ -784,7 +820,7 @@ io.on('connection', (socket) => {
           target: 'user',
           amount: pts,
           type: 'credit',
-          reason: 'Daily Task Approved: ' + (slotTitle || 'Task'),
+          reason: 'Daily Task Approved: ' + (slotTitle || updatedSubmission.slotTitle || 'Task'),
           newEntry,
           currentLoveBalance: globalLoveBalanceState.loveBalance,
           currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
@@ -794,9 +830,10 @@ io.on('connection', (socket) => {
 
       io.emit('daily_task_submission_updated', {
         submission: updatedSubmission,
+        submissionId: submissionId || (updatedSubmission && updatedSubmission.id),
         approved: true,
         pointsAwarded: pts,
-        slotTitle: slotTitle || 'Routine Task'
+        slotTitle: slotTitle || (updatedSubmission && updatedSubmission.slotTitle) || 'Routine Task'
       });
     } catch (err) {
       console.error('Error in daily_task_approve:', err);
