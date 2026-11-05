@@ -27,15 +27,116 @@ const io = new Server(server, {
 
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/stealth_chat?retryWrites=true&w=majority";
 
+// --- REAL-TIME SERVER-SIDE LOVE BALANCE & WISHES PERSISTENCE ---
+const LOVE_STATE_FILE = path.join(__dirname, 'love_balance_state.json');
+
+let globalLoveBalanceState = {
+  loveBalance: 0,
+  adminLoveBalance: 0,
+  loveLedger: [],
+  wishRequests: [],
+  deletedSlotIds: [],
+  dailySlots: []
+};
+
+function calculateNetBalance(ledger, target = 'user') {
+  if (!Array.isArray(ledger)) return 0;
+  const entries = ledger.filter(e => {
+    if (!e) return false;
+    if (target === 'admin') {
+      return e.target === 'admin' || (e.description && e.description.includes('[Darsh]'));
+    }
+    return e.target !== 'admin' && !(e.description && e.description.includes('[Darsh]'));
+  });
+
+  const credits = entries
+    .filter(e => e.type === 'credit')
+    .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
+
+  const debits = entries
+    .filter(e => e.type === 'debit' && e.status !== 'Redeemed')
+    .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
+
+  const redeems = entries
+    .filter(e => e.type === 'redeem' || e.status === 'Redeemed')
+    .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
+
+  return parseFloat((credits - debits - redeems).toFixed(2));
+}
+
+function syncBalancesFromLedger() {
+  globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+  globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+}
+
+try {
+  if (fs.existsSync(LOVE_STATE_FILE)) {
+    const raw = fs.readFileSync(LOVE_STATE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      globalLoveBalanceState = {
+        loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
+        adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
+        loveLedger: Array.isArray(parsed.loveLedger) 
+          ? parsed.loveLedger.filter(item => {
+              if (!item) return false;
+              if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
+              if (item.description && (
+                item.description.includes('Announcement Read') ||
+                item.description.includes('Monthly Punctuality Reward')
+              )) return false;
+              return true;
+            })
+          : [],
+        wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : [],
+        deletedSlotIds: Array.isArray(parsed.deletedSlotIds) ? parsed.deletedSlotIds : [],
+        dailySlots: Array.isArray(parsed.dailySlots) ? parsed.dailySlots : []
+      };
+      syncBalancesFromLedger();
+    }
+  }
+} catch (e) {
+  console.warn('Could not read love_balance_state.json:', e);
+}
+
 const loveBalanceSchema = new mongoose.Schema({
   key: { type: String, default: 'global_state', unique: true },
   loveBalance: { type: Number, default: 0 },
   adminLoveBalance: { type: Number, default: 0 },
   loveLedger: { type: Array, default: [] },
-  wishRequests: { type: Array, default: [] }
+  wishRequests: { type: Array, default: [] },
+  deletedSlotIds: { type: Array, default: [] },
+  dailySlots: { type: Array, default: [] }
 }, { timestamps: true });
 
 const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
+
+function persistLoveState() {
+  syncBalancesFromLedger();
+  try {
+    fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
+  } catch (e) {
+    console.warn('Could not write love_balance_state.json:', e);
+  }
+  try {
+    if (mongoose.connection.readyState === 1) {
+      LoveBalanceModel.findOneAndUpdate(
+        { key: 'global_state' },
+        {
+          loveBalance: globalLoveBalanceState.loveBalance,
+          adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          loveLedger: globalLoveBalanceState.loveLedger,
+          wishRequests: globalLoveBalanceState.wishRequests,
+          deletedSlotIds: globalLoveBalanceState.deletedSlotIds,
+          dailySlots: globalLoveBalanceState.dailySlots
+        },
+        { upsert: true, new: true }
+      ).catch(err => console.warn('Could not save Love Balance to MongoDB:', err));
+    }
+  } catch (err) {
+    console.warn('MongoDB save exception:', err);
+  }
+}
 
 mongoose.connect(MONGO_URI)
   .then(async () => {
@@ -43,11 +144,9 @@ mongoose.connect(MONGO_URI)
     try {
       const doc = await LoveBalanceModel.findOne({ key: 'global_state' });
       if (doc) {
-        if (typeof doc.loveBalance === 'number') {
-          globalLoveBalanceState.loveBalance = doc.loveBalance;
-        }
-        if (typeof doc.adminLoveBalance === 'number') {
-          globalLoveBalanceState.adminLoveBalance = doc.adminLoveBalance;
+        if (Array.isArray(doc.deletedSlotIds) && doc.deletedSlotIds.length > 0) {
+          const mergedDeleted = Array.from(new Set([...(globalLoveBalanceState.deletedSlotIds || []), ...doc.deletedSlotIds]));
+          globalLoveBalanceState.deletedSlotIds = mergedDeleted;
         }
         if (Array.isArray(doc.loveLedger) && doc.loveLedger.length > 0) {
           const merged = [...doc.loveLedger];
@@ -62,6 +161,9 @@ mongoose.connect(MONGO_URI)
             if (!mergedWishes.some(w => w && w.id === r.id)) mergedWishes.push(r);
           }
           globalLoveBalanceState.wishRequests = mergedWishes;
+        }
+        if (Array.isArray(doc.dailySlots) && doc.dailySlots.length > 0) {
+          globalLoveBalanceState.dailySlots = doc.dailySlots.filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
         }
         persistLoveState();
         console.log("Synchronized Love Balance from MongoDB: Dora ₹", globalLoveBalanceState.loveBalance, "| Darsh ₹", globalLoveBalanceState.adminLoveBalance);
@@ -135,12 +237,23 @@ let memoryDailySubmissions = [];
 
 async function seedDefaultSlotsIfEmpty() {
   try {
+    const deleted = globalLoveBalanceState.deletedSlotIds || [];
+    const validDefaults = DEFAULT_DAILY_SLOTS.filter(s => !deleted.includes(s.id));
+
     if (mongoose.connection.readyState === 1) {
       const count = await DailyTaskSlot.countDocuments();
-      if (count === 0) {
-        await DailyTaskSlot.insertMany(DEFAULT_DAILY_SLOTS);
+      if (count === 0 && validDefaults.length > 0) {
+        await DailyTaskSlot.insertMany(validDefaults);
         console.log('Seeded default daily task slots into MongoDB.');
       }
+      if (deleted.length > 0) {
+        await DailyTaskSlot.deleteMany({ id: { $in: deleted } }).catch(() => {});
+      }
+    }
+    if (Array.isArray(globalLoveBalanceState.dailySlots) && globalLoveBalanceState.dailySlots.length > 0) {
+      memoryDailySlots = globalLoveBalanceState.dailySlots.filter(s => s && !deleted.includes(s.id));
+    } else {
+      memoryDailySlots = validDefaults;
     }
   } catch (err) {
     console.warn('Error seeding default daily slots:', err);
@@ -163,67 +276,6 @@ function getAccurateSyncTime() {
     return Math.max(0, globalSyncState.currentTime + elapsed);
   }
   return globalSyncState.currentTime;
-}
-
-// --- REAL-TIME SERVER-SIDE LOVE BALANCE & WISHES PERSISTENCE ---
-const LOVE_STATE_FILE = path.join(__dirname, 'love_balance_state.json');
-
-let globalLoveBalanceState = {
-  loveBalance: 0,
-  adminLoveBalance: 0,
-  loveLedger: [],
-  wishRequests: []
-};
-
-try {
-  if (fs.existsSync(LOVE_STATE_FILE)) {
-    const raw = fs.readFileSync(LOVE_STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      globalLoveBalanceState = {
-        loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
-        adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
-        loveLedger: Array.isArray(parsed.loveLedger) 
-          ? parsed.loveLedger.filter(item => {
-              if (!item) return false;
-              if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
-              if (item.description && (
-                item.description.includes('Announcement Read') ||
-                item.description.includes('Monthly Punctuality Reward')
-              )) return false;
-              return true;
-            })
-          : [],
-        wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : []
-      };
-    }
-  }
-} catch (e) {
-  console.warn('Could not read love_balance_state.json:', e);
-}
-
-function persistLoveState() {
-  try {
-    fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
-  } catch (e) {
-    console.warn('Could not write love_balance_state.json:', e);
-  }
-  try {
-    if (mongoose.connection.readyState === 1) {
-      LoveBalanceModel.findOneAndUpdate(
-        { key: 'global_state' },
-        {
-          loveBalance: globalLoveBalanceState.loveBalance,
-          adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-          loveLedger: globalLoveBalanceState.loveLedger,
-          wishRequests: globalLoveBalanceState.wishRequests
-        },
-        { upsert: true, new: true }
-      ).catch(err => console.warn('Could not save Love Balance to MongoDB:', err));
-    }
-  } catch (err) {
-    console.warn('MongoDB save exception:', err);
-  }
 }
 
 const codexCinemaState = {
@@ -340,6 +392,8 @@ io.on('connection', (socket) => {
     }
 
     // Sync Love Balance real-time state to newly connected client
+    const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+    const activeSlots = (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id));
     socket.emit('love_balance_broadcast', {
       action: 'SYNC_STATE_RESPONSE',
       loveBalance: globalLoveBalanceState.loveBalance,
@@ -347,7 +401,9 @@ io.on('connection', (socket) => {
       currentLoveBalance: globalLoveBalanceState.loveBalance,
       currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
       loveLedger: globalLoveBalanceState.loveLedger,
-      wishRequests: globalLoveBalanceState.wishRequests
+      wishRequests: globalLoveBalanceState.wishRequests,
+      deletedSlotIds: activeDeleted,
+      dailySlots: activeSlots
     });
 
     try {
@@ -355,20 +411,24 @@ io.on('connection', (socket) => {
       let initialSlots = [];
       let initialSubmissions = [];
       if (mongoose.connection.readyState === 1) {
-        initialSlots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
+        initialSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1 }).lean();
         if (initialSlots.length === 0) {
-          await DailyTaskSlot.insertMany(DEFAULT_DAILY_SLOTS);
-          initialSlots = await DailyTaskSlot.find().sort({ order: 1 }).lean();
+          const validDefaults = DEFAULT_DAILY_SLOTS.filter(s => !activeDeleted.includes(s.id));
+          if (validDefaults.length > 0) {
+            await DailyTaskSlot.insertMany(validDefaults);
+            initialSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1 }).lean();
+          }
         }
         initialSubmissions = await DailyTaskSubmission.find({ date: todayStr }).lean();
       } else {
-        initialSlots = memoryDailySlots;
+        initialSlots = activeSlots;
         initialSubmissions = memoryDailySubmissions.filter(s => s.date === todayStr);
       }
       socket.emit('daily_task_sync_response', {
         date: todayStr,
         slots: initialSlots,
-        submissions: initialSubmissions
+        submissions: initialSubmissions,
+        deletedSlotIds: activeDeleted
       });
     } catch (e) {
       console.warn('Initial daily task sync error:', e);
@@ -453,45 +513,51 @@ io.on('connection', (socket) => {
     if (data.action === 'CLEAR_LEDGER') {
       const target = data.target || 'user';
       if (target === 'user') {
-        globalLoveBalanceState.loveBalance = 0;
         globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target === 'admin' || (item.description && item.description.includes('[Darsh]')));
       } else if (target === 'admin') {
-        globalLoveBalanceState.adminLoveBalance = 0;
         globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
       } else {
-        globalLoveBalanceState.loveBalance = 0;
-        globalLoveBalanceState.adminLoveBalance = 0;
         globalLoveBalanceState.loveLedger = [];
       }
       persistLoveState();
     } else if (data.action === 'TRANSACTION') {
-      const numAmount = Math.abs(parseFloat(data.amount) || 0);
-      const delta = data.type === 'credit' ? numAmount : -numAmount;
-      if (data.target === 'admin') {
-        globalLoveBalanceState.adminLoveBalance = parseFloat((globalLoveBalanceState.adminLoveBalance + delta).toFixed(2));
-      } else {
-        globalLoveBalanceState.loveBalance = parseFloat((globalLoveBalanceState.loveBalance + delta).toFixed(2));
-      }
       if (data.newEntry) {
         globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
       }
       persistLoveState();
     } else if (data.action === 'OVERRIDE_BALANCE') {
       const val = parseFloat(data.newBalance) || 0;
-      if (data.target === 'admin') {
-        globalLoveBalanceState.adminLoveBalance = val;
-      } else {
-        globalLoveBalanceState.loveBalance = val;
+      const target = data.target || 'user';
+      const curr = calculateNetBalance(globalLoveBalanceState.loveLedger, target);
+      const diff = parseFloat((val - curr).toFixed(2));
+      if (diff !== 0) {
+        const type = diff > 0 ? 'credit' : 'debit';
+        const numAmount = Math.abs(diff);
+        const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
+        const newEntry = {
+          id: 'lb_adj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+          sl: 1,
+          target,
+          description: '[' + targetLabel + '] Admin Balance Adjustment (' + (diff > 0 ? '+' : '') + diff.toFixed(2) + ')',
+          earnedAt: new Date().toLocaleString('en-GB'),
+          expireDate: '',
+          points: type === 'credit' ? numAmount : -numAmount,
+          type,
+          remarks: 'Manual Balance Set by Admin',
+          status: 'Confirmed'
+        };
+        globalLoveBalanceState.loveLedger = [newEntry, ...globalLoveBalanceState.loveLedger];
       }
       persistLoveState();
     } else if (data.action === 'REQUEST_SYNC') {
-      // Adopt client balance & data if server is currently 0 / empty (e.g. after cloud server reboot)
-      if (typeof data.clientLoveBalance === 'number' && globalLoveBalanceState.loveBalance === 0 && data.clientLoveBalance !== 0) {
-        globalLoveBalanceState.loveBalance = data.clientLoveBalance;
+      if (Array.isArray(data.deletedSlotIds) && data.deletedSlotIds.length > 0) {
+        globalLoveBalanceState.deletedSlotIds = Array.from(new Set([
+          ...(globalLoveBalanceState.deletedSlotIds || []),
+          ...data.deletedSlotIds
+        ]));
       }
-      if (typeof data.clientAdminLoveBalance === 'number' && globalLoveBalanceState.adminLoveBalance === 0 && data.clientAdminLoveBalance !== 0) {
-        globalLoveBalanceState.adminLoveBalance = data.clientAdminLoveBalance;
-      }
+      const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+
       if (Array.isArray(data.clientLoveLedger) && data.clientLoveLedger.length > 0) {
         const merged = [...(globalLoveBalanceState.loveLedger || [])];
         for (const item of data.clientLoveLedger) {
@@ -516,7 +582,8 @@ io.on('connection', (socket) => {
         }
       }
       if (Array.isArray(data.clientSlots) && data.clientSlots.length > 0) {
-        memoryDailySlots = data.clientSlots;
+        memoryDailySlots = data.clientSlots.filter(s => s && s.id && !activeDeleted.includes(s.id));
+        globalLoveBalanceState.dailySlots = memoryDailySlots;
       }
       persistLoveState();
 
@@ -524,10 +591,13 @@ io.on('connection', (socket) => {
         action: 'SYNC_STATE_RESPONSE',
         loveBalance: globalLoveBalanceState.loveBalance,
         adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
         loveLedger: globalLoveBalanceState.loveLedger,
         wishRequests: globalLoveBalanceState.wishRequests,
         dailySubmissions: memoryDailySubmissions,
-        dailySlots: memoryDailySlots && memoryDailySlots.length > 0 ? memoryDailySlots : DEFAULT_DAILY_SLOTS
+        dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
+        deletedSlotIds: activeDeleted
       });
       return;
     } else if (data.action === 'DAILY_TASK_SUBMIT' && data.submission) {
@@ -605,29 +675,42 @@ io.on('connection', (socket) => {
       }
       io.emit('daily_task_submission_updated', { submission: item, rejected: true, feedback: data.feedback });
     } else if (data.action === 'DAILY_SLOT_DELETE' && data.slotId) {
-      memoryDailySlots = memoryDailySlots.filter(s => s.id !== data.slotId);
+      const allDeleted = Array.from(new Set([
+        ...(globalLoveBalanceState.deletedSlotIds || []),
+        data.slotId,
+        ...(Array.isArray(data.deletedSlotIds) ? data.deletedSlotIds : [])
+      ]));
+      globalLoveBalanceState.deletedSlotIds = allDeleted;
+      memoryDailySlots = memoryDailySlots.filter(s => !allDeleted.includes(s.id));
+      globalLoveBalanceState.dailySlots = memoryDailySlots;
+      persistLoveState();
       if (mongoose.connection.readyState === 1) {
-        DailyTaskSlot.deleteOne({ id: data.slotId }).catch(() => {});
+        DailyTaskSlot.deleteMany({ id: { $in: allDeleted } }).catch(() => {});
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: allDeleted });
     } else if (data.action === 'DAILY_SLOT_UPDATE' && data.slotId) {
       const idx = memoryDailySlots.findIndex(s => s.id === data.slotId);
       if (idx >= 0) {
         memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...data.updates };
+        globalLoveBalanceState.dailySlots = memoryDailySlots;
+        persistLoveState();
         if (mongoose.connection.readyState === 1) {
           DailyTaskSlot.findOneAndUpdate({ id: data.slotId }, data.updates).catch(() => {});
         }
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
     } else if (data.action === 'DAILY_SLOT_CREATE' && data.slot) {
+      globalLoveBalanceState.deletedSlotIds = (globalLoveBalanceState.deletedSlotIds || []).filter(id => id !== data.slot.id);
       const exists = memoryDailySlots.some(s => s.id === data.slot.id);
       if (!exists) {
         memoryDailySlots.push(data.slot);
+        globalLoveBalanceState.dailySlots = memoryDailySlots;
+        persistLoveState();
         if (mongoose.connection.readyState === 1) {
           DailyTaskSlot.create(data.slot).catch(() => {});
         }
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
     } else if (data.action === 'WISH_REQUEST' && data.wishRequest) {
       globalLoveBalanceState.wishRequests = [data.wishRequest, ...globalLoveBalanceState.wishRequests.filter(r => r.id !== data.wishRequest.id)];
       persistLoveState();
@@ -661,17 +744,22 @@ io.on('connection', (socket) => {
   socket.on('daily_task_request_sync', async ({ date }) => {
     try {
       const targetDate = date || new Date().toISOString().split('T')[0];
-      let slots = memoryDailySlots && memoryDailySlots.length > 0 ? memoryDailySlots : DEFAULT_DAILY_SLOTS;
+      const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+      let slots = (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id));
       let submissions = [...memoryDailySubmissions];
 
       if (mongoose.connection.readyState === 1) {
         try {
-          const dbSlots = await DailyTaskSlot.find().sort({ order: 1, createdAt: 1 }).lean();
+          const dbSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1, createdAt: 1 }).lean();
           if (dbSlots && dbSlots.length > 0) {
             slots = dbSlots;
             memoryDailySlots = dbSlots;
           } else {
-            await DailyTaskSlot.insertMany(DEFAULT_DAILY_SLOTS);
+            const validDefaults = DEFAULT_DAILY_SLOTS.filter(s => !activeDeleted.includes(s.id));
+            if (validDefaults.length > 0) {
+              await DailyTaskSlot.insertMany(validDefaults);
+              slots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1, createdAt: 1 }).lean();
+            }
           }
           const dbSubs = await DailyTaskSubmission.find({
             $or: [{ date: targetDate }, { status: 'PENDING' }]
@@ -691,7 +779,8 @@ io.on('connection', (socket) => {
       socket.emit('daily_task_sync_response', {
         date: targetDate,
         slots,
-        submissions
+        submissions,
+        deletedSlotIds: activeDeleted
       });
     } catch (err) {
       console.error('Error in daily_task_request_sync:', err);
@@ -797,35 +886,41 @@ io.on('connection', (socket) => {
         memoryDailySubmissions.push(updatedSubmission);
       }
 
-      // Award Love Balance points to Dora
+      // Award Love Balance points to Dora (deduplicated by submission ID)
       if (pts > 0) {
-        globalLoveBalanceState.loveBalance = parseFloat((globalLoveBalanceState.loveBalance + pts).toFixed(2));
-        const newEntry = {
-          id: 'lb_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-          sl: 1,
-          target: 'user',
-          description: '[Dora] Approved Task: ' + (slotTitle || updatedSubmission.slotTitle || 'Daily Routine Task'),
-          earnedAt: new Date().toLocaleString('en-GB'),
-          expireDate: '',
-          points: pts,
-          type: 'credit',
-          remarks: 'Daily Routine Task Approved by Darsh',
-          status: 'Confirmed'
-        };
-        globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-        persistLoveState();
+        const approvalEntryId = 'lb_appr_' + (submissionId || `${date || new Date().toISOString().split('T')[0]}_${slotId}`);
+        const taskName = slotTitle || updatedSubmission.slotTitle || 'Daily Routine Task';
+        const alreadyExists = (globalLoveBalanceState.loveLedger || []).some(e => 
+          e && (e.id === approvalEntryId || (e.description && e.description.includes(`Approved Task: ${taskName}`) && e.earnedAt && e.earnedAt.startsWith(new Date().toLocaleDateString('en-GB'))))
+        );
+        if (!alreadyExists) {
+          const newEntry = {
+            id: approvalEntryId,
+            sl: 1,
+            target: 'user',
+            description: '[Dora] Approved Task: ' + taskName,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: pts,
+            type: 'credit',
+            remarks: 'Daily Routine Task Approved by Darsh',
+            status: 'Confirmed'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          persistLoveState();
 
-        io.emit('love_balance_broadcast', {
-          action: 'TRANSACTION',
-          target: 'user',
-          amount: pts,
-          type: 'credit',
-          reason: 'Daily Task Approved: ' + (slotTitle || updatedSubmission.slotTitle || 'Task'),
-          newEntry,
-          currentLoveBalance: globalLoveBalanceState.loveBalance,
-          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-          serverTimestamp: Date.now()
-        });
+          io.emit('love_balance_broadcast', {
+            action: 'TRANSACTION',
+            target: 'user',
+            amount: pts,
+            type: 'credit',
+            reason: 'Daily Task Approved: ' + taskName,
+            newEntry,
+            currentLoveBalance: globalLoveBalanceState.loveBalance,
+            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            serverTimestamp: Date.now()
+          });
+        }
       }
 
       io.emit('daily_task_submission_updated', {
@@ -886,13 +981,16 @@ io.on('connection', (socket) => {
         isActive: true
       };
 
+      globalLoveBalanceState.deletedSlotIds = (globalLoveBalanceState.deletedSlotIds || []).filter(id => id !== newSlot.id);
       const exists = memoryDailySlots.some(s => s.id === newSlot.id);
       if (!exists) memoryDailySlots.push(newSlot);
+      globalLoveBalanceState.dailySlots = memoryDailySlots;
+      persistLoveState();
 
       if (mongoose.connection.readyState === 1) {
         DailyTaskSlot.create(newSlot).catch(() => {});
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
     } catch (err) {
       console.error('Error in daily_slot_create:', err);
     }
@@ -905,23 +1003,33 @@ io.on('connection', (socket) => {
       if (idx >= 0) {
         memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...updates };
       }
+      globalLoveBalanceState.dailySlots = memoryDailySlots;
+      persistLoveState();
       if (mongoose.connection.readyState === 1) {
         DailyTaskSlot.findOneAndUpdate({ id: slotId }, updates, { new: true }).catch(() => {});
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
     } catch (err) {
       console.error('Error in daily_slot_update:', err);
     }
   });
 
-  socket.on('daily_slot_delete', async ({ slotId }) => {
+  socket.on('daily_slot_delete', async ({ slotId, deletedSlotIds }) => {
     try {
       if (!slotId) return;
-      memoryDailySlots = memoryDailySlots.filter(s => s.id !== slotId);
+      const allDeleted = Array.from(new Set([
+        ...(globalLoveBalanceState.deletedSlotIds || []),
+        slotId,
+        ...(Array.isArray(deletedSlotIds) ? deletedSlotIds : [])
+      ]));
+      globalLoveBalanceState.deletedSlotIds = allDeleted;
+      memoryDailySlots = memoryDailySlots.filter(s => !allDeleted.includes(s.id));
+      globalLoveBalanceState.dailySlots = memoryDailySlots;
+      persistLoveState();
       if (mongoose.connection.readyState === 1) {
-        DailyTaskSlot.deleteOne({ id: slotId }).catch(() => {});
+        await DailyTaskSlot.deleteMany({ id: { $in: allDeleted } }).catch(() => {});
       }
-      io.emit('daily_slots_updated', { slots: memoryDailySlots });
+      io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: allDeleted });
     } catch (err) {
       console.error('Error in daily_slot_delete:', err);
     }
