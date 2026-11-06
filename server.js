@@ -564,6 +564,23 @@ setInterval(() => {
 setInterval(evaluateRoutineAndHabitInfractions, 60000);
 setTimeout(evaluateRoutineAndHabitInfractions, 3000);
 
+// High-frequency 4-second authoritative sync heartbeat broadcast across all devices
+setInterval(() => {
+  const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+  io.emit('love_balance_heartbeat_sync', {
+    loveBalance: globalLoveBalanceState.loveBalance,
+    adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+    currentLoveBalance: globalLoveBalanceState.loveBalance,
+    currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+    loveLedger: globalLoveBalanceState.loveLedger,
+    wishRequests: globalLoveBalanceState.wishRequests,
+    dailySubmissions: memoryDailySubmissions,
+    dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
+    deletedSlotIds: activeDeleted,
+    serverTimestamp: Date.now()
+  });
+}, 4000);
+
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
@@ -732,6 +749,8 @@ io.on('connection', (socket) => {
       } else {
         globalLoveBalanceState.loveLedger = [];
       }
+      globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+      globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
     } else if (data.action === 'TRANSACTION') {
       if (data.newEntry) {
@@ -940,8 +959,13 @@ io.on('connection', (socket) => {
 
     const payload = {
       ...data,
+      originSocketId: socket.id,
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
       currentLoveBalance: globalLoveBalanceState.loveBalance,
       currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger,
+      wishRequests: globalLoveBalanceState.wishRequests,
       serverTimestamp: Date.now()
     };
     io.emit('love_balance_broadcast', payload);
