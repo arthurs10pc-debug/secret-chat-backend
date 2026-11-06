@@ -76,9 +76,7 @@ function sanitizeLedger(ledger) {
     if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
     if (item.description && (
       item.description.includes('Announcement Read') ||
-      item.description.includes('Monthly Punctuality Reward') ||
-      item.description.includes('Daily Routine: Morning Workout') ||
-      item.description.includes('Daily Routine:')
+      item.description.includes('Monthly Punctuality Reward')
     )) return false;
     return true;
   });
@@ -422,108 +420,8 @@ function evaluateRoutineAndHabitInfractions() {
       }
     });
 
-    // 3. MORNING GREETING EVALUATION (PAST 9:00 AM IST)
-    if (currentHour >= 9) {
-      const isMorningMsg = (text) => {
-        if (!text || typeof text !== 'string') return false;
-        const lower = text.toLowerCase();
-        return lower.includes('good morning') || lower.includes('morning') || lower.includes('gm') || 
-               lower.includes('gud mrng') || lower.includes('suprabhat') || lower.includes('subah') ||
-               lower.includes('goodmrng') || lower.includes('mrg') || lower.includes('uth jao');
-      };
-
-      const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
-
-      // Dora morning check
-      const doraTodayKey = `[Dora] Missed Morning Greeting (${todayStr})`;
-      const doraTodayCreditKey = `[Dora] Morning Sweet Text (Before 9:00 AM) (${todayStr})`;
-      if (!hasLedgerMatch(doraTodayKey) && !hasLedgerMatch(doraTodayCreditKey)) {
-        const hadMorning = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
-          return isDora && mDate === todayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-        });
-        if (hadMorning) {
-          const newEntry = {
-            id: `morning_credit_${todayStr}_user`,
-            sl: 1,
-            target: 'user',
-            description: doraTodayCreditKey,
-            earnedAt: new Date().toLocaleString('en-GB'),
-            expireDate: '',
-            points: 2.0,
-            type: 'credit',
-            remarks: 'Daily Morning Sweet Greeting',
-            status: 'Confirmed'
-          };
-          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          ledgerChanged = true;
-        } else {
-          const newEntry = {
-            id: `morning_missed_${todayStr}_user`,
-            sl: 1,
-            target: 'user',
-            description: doraTodayKey,
-            earnedAt: new Date().toLocaleString('en-GB'),
-            expireDate: '',
-            points: -2.0,
-            type: 'debit',
-            remarks: 'Missed Morning Greeting Before 9:00 AM',
-            status: 'Deducted'
-          };
-          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          ledgerChanged = true;
-        }
-      }
-
-      // Darsh morning check
-      const darshTodayKey = `[Darsh] Missed Morning Greeting (${todayStr})`;
-      const darshTodayCreditKey = `[Darsh] Morning Sweet Text (Before 9:00 AM) (${todayStr})`;
-      if (!hasLedgerMatch(darshTodayKey) && !hasLedgerMatch(darshTodayCreditKey)) {
-        const hadMorning = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
-          return isDarsh && mDate === todayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-        });
-        if (hadMorning) {
-          const newEntry = {
-            id: `morning_credit_${todayStr}_admin`,
-            sl: 1,
-            target: 'admin',
-            description: darshTodayCreditKey,
-            earnedAt: new Date().toLocaleString('en-GB'),
-            expireDate: '',
-            points: 2.0,
-            type: 'credit',
-            remarks: 'Daily Morning Sweet Greeting',
-            status: 'Confirmed'
-          };
-          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          ledgerChanged = true;
-        } else {
-          const newEntry = {
-            id: `morning_missed_${todayStr}_admin`,
-            sl: 1,
-            target: 'admin',
-            description: darshTodayKey,
-            earnedAt: new Date().toLocaleString('en-GB'),
-            expireDate: '',
-            points: -2.0,
-            type: 'debit',
-            remarks: 'Missed Morning Greeting Before 9:00 AM',
-            status: 'Deducted'
-          };
-          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          ledgerChanged = true;
-        }
-      }
-    }
+    // 3. MORNING GREETING & MESSAGE HABITS:
+    // Handled authoritatively by clients who possess the decryption key for end-to-end encrypted messages.
 
     if (ledgerChanged) {
       persistLoveState();
