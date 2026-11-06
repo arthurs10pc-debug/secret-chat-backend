@@ -75,7 +75,7 @@ function sanitizeLedger(ledger) {
   const lastCleared = globalLoveBalanceState?.lastClearedAt || 0;
   const todayStr = new Date(Date.now() + istOffset).toISOString().split('T')[0];
   const yesterdayStr = new Date(Date.now() + istOffset - 86400000).toISOString().split('T')[0];
-  const clearedToday = lastCleared > 0 && new Date(lastCleared + istOffset).toISOString().split('T')[0] === todayStr;
+  const clearedRecently = lastCleared > 0 && (Date.now() - lastCleared < 24 * 60 * 60 * 1000 || new Date(lastCleared + istOffset).toISOString().split('T')[0] === todayStr);
 
   return ledger.filter(item => {
     if (!item) return false;
@@ -85,14 +85,14 @@ function sanitizeLedger(ledger) {
       item.description.includes('Monthly Punctuality Reward')
     )) return false;
 
-    // If cleared today, purge all auto-generated habit infractions for today & yesterday that occurred around clear
-    if (clearedToday && item.description) {
+    // If cleared recently/today, purge all auto-generated habit infractions
+    if (clearedRecently && item.description) {
       const isHabitDeduction = item.type === 'debit' && (
         item.description.includes('Missed Morning Greeting') ||
         item.description.includes('Sleeping Without "Good Night"') ||
         item.description.includes('Missed Routine Task')
       );
-      if (isHabitDeduction && (item.description.includes(todayStr) || item.description.includes(yesterdayStr) || item.description.includes('(Today)'))) {
+      if (isHabitDeduction) {
         return false;
       }
     }
