@@ -71,6 +71,12 @@ function syncBalancesFromLedger() {
 
 function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const lastCleared = globalLoveBalanceState?.lastClearedAt || 0;
+  const todayStr = new Date(Date.now() + istOffset).toISOString().split('T')[0];
+  const yesterdayStr = new Date(Date.now() + istOffset - 86400000).toISOString().split('T')[0];
+  const clearedToday = lastCleared > 0 && new Date(lastCleared + istOffset).toISOString().split('T')[0] === todayStr;
+
   return ledger.filter(item => {
     if (!item) return false;
     if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
@@ -78,6 +84,19 @@ function sanitizeLedger(ledger) {
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
     )) return false;
+
+    // If cleared today, purge all auto-generated habit infractions for today & yesterday that occurred around clear
+    if (clearedToday && item.description) {
+      const isHabitDeduction = item.type === 'debit' && (
+        item.description.includes('Missed Morning Greeting') ||
+        item.description.includes('Sleeping Without "Good Night"') ||
+        item.description.includes('Missed Routine Task')
+      );
+      if (isHabitDeduction && (item.description.includes(todayStr) || item.description.includes(yesterdayStr) || item.description.includes('(Today)'))) {
+        return false;
+      }
+    }
+
     return true;
   });
 }
@@ -383,18 +402,17 @@ function evaluateRoutineAndHabitInfractions() {
 
     // 1. TODAY'S ROUTINE TASKS DEADLINE EVALUATION
     const lastCleared = globalLoveBalanceState.lastClearedAt || 0;
+    if (lastCleared > 0) {
+      const clearedDate = new Date(lastCleared + istOffset).toISOString().split('T')[0];
+      if (clearedDate >= todayStr) {
+        // Cleared today! Forgive all routine penalties for today; only resume next day!
+        return;
+      }
+    }
+
     activeSlots.forEach(slot => {
       const endMinutes = parseSlotEndMinutes(slot.timeRange);
       if (endMinutes !== null && currentMinutes >= endMinutes) {
-        // If ledger was cleared after or during this slot, do not retroactively penalize
-        if (lastCleared > 0 && Date.now() - lastCleared < 24 * 60 * 60 * 1000) {
-          const clearedDate = new Date(lastCleared + istOffset).toISOString().split('T')[0];
-          if (clearedDate === todayStr) {
-            const clearedMinutes = new Date(lastCleared + istOffset).getUTCHours() * 60 + new Date(lastCleared + istOffset).getUTCMinutes();
-            if (clearedMinutes >= endMinutes) return; // Forgiven by clear
-          }
-        }
-
         const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === todayStr);
         const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
         const missedKey = `[Dora] Missed Routine Task: ${slot.title} (${todayStr})`;
