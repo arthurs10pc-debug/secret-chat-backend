@@ -109,13 +109,16 @@ const loveBalanceSchema = new mongoose.Schema({
   loveLedger: { type: Array, default: [] },
   wishRequests: { type: Array, default: [] },
   deletedSlotIds: { type: Array, default: [] },
+  deletedTransactionIds: { type: Array, default: [] },
+  lastClearedAt: { type: Number, default: 0 },
   dailySlots: { type: Array, default: [] }
 }, { timestamps: true });
 
 const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
 
 function persistLoveState() {
-  globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
+  const deletedTxs = globalLoveBalanceState.deletedTransactionIds || [];
+  globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger).filter(item => item && !deletedTxs.includes(item.id));
   syncBalancesFromLedger();
   try {
     fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
@@ -132,6 +135,8 @@ function persistLoveState() {
           loveLedger: globalLoveBalanceState.loveLedger,
           wishRequests: globalLoveBalanceState.wishRequests,
           deletedSlotIds: globalLoveBalanceState.deletedSlotIds,
+          deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds,
+          lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
           dailySlots: globalLoveBalanceState.dailySlots
         },
         { upsert: true, new: true }
@@ -152,8 +157,15 @@ mongoose.connect(MONGO_URI)
           const mergedDeleted = Array.from(new Set([...(globalLoveBalanceState.deletedSlotIds || []), ...doc.deletedSlotIds]));
           globalLoveBalanceState.deletedSlotIds = mergedDeleted;
         }
-        if (Array.isArray(doc.loveLedger) && doc.loveLedger.length > 0) {
-          globalLoveBalanceState.loveLedger = sanitizeLedger(doc.loveLedger);
+        if (Array.isArray(doc.deletedTransactionIds)) {
+          globalLoveBalanceState.deletedTransactionIds = Array.from(new Set([...(globalLoveBalanceState.deletedTransactionIds || []), ...doc.deletedTransactionIds]));
+        }
+        if (typeof doc.lastClearedAt === 'number') {
+          globalLoveBalanceState.lastClearedAt = doc.lastClearedAt;
+        }
+        if (Array.isArray(doc.loveLedger)) {
+          const activeDelTxs = globalLoveBalanceState.deletedTransactionIds || [];
+          globalLoveBalanceState.loveLedger = sanitizeLedger(doc.loveLedger).filter(item => item && !activeDelTxs.includes(item.id));
         }
         if (Array.isArray(doc.wishRequests) && doc.wishRequests.length > 0) {
           const mergedWishes = [...doc.wishRequests];
@@ -370,13 +382,25 @@ function evaluateRoutineAndHabitInfractions() {
     let ledgerChanged = false;
 
     // 1. TODAY'S ROUTINE TASKS DEADLINE EVALUATION
+    const lastCleared = globalLoveBalanceState.lastClearedAt || 0;
     activeSlots.forEach(slot => {
       const endMinutes = parseSlotEndMinutes(slot.timeRange);
       if (endMinutes !== null && currentMinutes >= endMinutes) {
+        // If ledger was cleared after or during this slot, do not retroactively penalize
+        if (lastCleared > 0 && Date.now() - lastCleared < 24 * 60 * 60 * 1000) {
+          const clearedDate = new Date(lastCleared + istOffset).toISOString().split('T')[0];
+          if (clearedDate === todayStr) {
+            const clearedMinutes = new Date(lastCleared + istOffset).getUTCHours() * 60 + new Date(lastCleared + istOffset).getUTCMinutes();
+            if (clearedMinutes >= endMinutes) return; // Forgiven by clear
+          }
+        }
+
         const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === todayStr);
         const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
         const missedKey = `[Dora] Missed Routine Task: ${slot.title} (${todayStr})`;
-        if (!hasValidSubmission && !hasLedgerMatch(missedKey)) {
+        const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+        const wasDeleted = delTxs.some(id => id.includes(`missed_${todayStr}_${slot.id}`));
+        if (!hasValidSubmission && !hasLedgerMatch(missedKey) && !wasDeleted) {
           const cutPts = Number(slot.rewardPoints || 2.0);
           const newEntry = {
             id: `missed_${todayStr}_${slot.id}`,
@@ -396,31 +420,7 @@ function evaluateRoutineAndHabitInfractions() {
       }
     });
 
-    // 2. YESTERDAY'S ROUTINE TASKS DEADLINE EVALUATION (Catch-up for yesterday)
-    activeSlots.forEach(slot => {
-      const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === yesterdayStr);
-      const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
-      const missedYesterdayKey = `[Dora] Missed Routine Task: ${slot.title} (${yesterdayStr})`;
-      if (!hasValidSubmission && !hasLedgerMatch(missedYesterdayKey)) {
-        const cutPts = Number(slot.rewardPoints || 2.0);
-        const newEntry = {
-          id: `missed_${yesterdayStr}_${slot.id}`,
-          sl: 1,
-          target: 'user',
-          description: missedYesterdayKey,
-          earnedAt: new Date().toLocaleString('en-GB'),
-          expireDate: '',
-          points: -cutPts,
-          type: 'debit',
-          remarks: 'Routine Task Missed Yesterday',
-          status: 'Deducted'
-        };
-        globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-        ledgerChanged = true;
-      }
-    });
-
-    // 3. MORNING GREETING & MESSAGE HABITS:
+    // 2. MORNING GREETING & MESSAGE HABITS:
     // Handled authoritatively by clients who possess the decryption key for end-to-end encrypted messages.
 
     if (ledgerChanged) {
@@ -475,6 +475,8 @@ setInterval(() => {
     dailySubmissions: memoryDailySubmissions,
     dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
     deletedSlotIds: activeDeleted,
+    deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+    lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
     serverTimestamp: Date.now()
   });
 }, 4000);
@@ -647,12 +649,25 @@ io.on('connection', (socket) => {
       } else {
         globalLoveBalanceState.loveLedger = [];
       }
+      globalLoveBalanceState.lastClearedAt = Date.now();
+      globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+      globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+      persistLoveState();
+    } else if (data.action === 'DELETE_TRANSACTION' && data.transactionId) {
+      if (!Array.isArray(globalLoveBalanceState.deletedTransactionIds)) {
+        globalLoveBalanceState.deletedTransactionIds = [];
+      }
+      globalLoveBalanceState.deletedTransactionIds.push(data.transactionId);
+      globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(e => e && e.id !== data.transactionId);
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
     } else if (data.action === 'TRANSACTION') {
       if (data.newEntry) {
-        globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
+        const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+        if (!delTxs.includes(data.newEntry.id)) {
+          globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
+        }
       }
       persistLoveState();
     } else if (data.action === 'OVERRIDE_BALANCE') {
@@ -721,7 +736,9 @@ io.on('connection', (socket) => {
         wishRequests: globalLoveBalanceState.wishRequests,
         dailySubmissions: memoryDailySubmissions,
         dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
-        deletedSlotIds: activeDeleted
+        deletedSlotIds: activeDeleted,
+        deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+        lastClearedAt: globalLoveBalanceState.lastClearedAt || 0
       });
       return;
     } else if (data.action === 'DAILY_TASK_SUBMIT' && data.submission) {
@@ -864,6 +881,8 @@ io.on('connection', (socket) => {
       currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
       loveLedger: globalLoveBalanceState.loveLedger,
       wishRequests: globalLoveBalanceState.wishRequests,
+      deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+      lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
       serverTimestamp: Date.now()
     };
     io.emit('love_balance_broadcast', payload);
