@@ -71,12 +71,6 @@ function syncBalancesFromLedger() {
 
 function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const lastCleared = globalLoveBalanceState?.lastClearedAt || 0;
-  const todayStr = new Date(Date.now() + istOffset).toISOString().split('T')[0];
-  const yesterdayStr = new Date(Date.now() + istOffset - 86400000).toISOString().split('T')[0];
-  const clearedRecently = lastCleared > 0 && (Date.now() - lastCleared < 24 * 60 * 60 * 1000 || new Date(lastCleared + istOffset).toISOString().split('T')[0] === todayStr);
-
   return ledger.filter(item => {
     if (!item) return false;
     if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
@@ -85,16 +79,13 @@ function sanitizeLedger(ledger) {
       item.description.includes('Monthly Punctuality Reward')
     )) return false;
 
-    // If cleared recently/today, purge all auto-generated habit infractions
-    if (clearedRecently && item.description) {
-      const isHabitDeduction = item.type === 'debit' && (
-        item.description.includes('Missed Morning Greeting') ||
-        item.description.includes('Sleeping Without "Good Night"') ||
-        item.description.includes('Missed Routine Task')
-      );
-      if (isHabitDeduction) {
-        return false;
-      }
+    // Purge phantom auto-generated habit & routine penalties so Dora's earned points stay permanent
+    if (item.type === 'debit' && item.description && (
+      item.description.includes('Missed Morning Greeting') ||
+      item.description.includes('Sleeping Without "Good Night"') ||
+      item.description.includes('Missed Routine Task')
+    )) {
+      return false;
     }
 
     return true;
@@ -412,32 +403,11 @@ function evaluateRoutineAndHabitInfractions() {
       }
     }
 
+    // Routine Task Slot Deadlines: In production, missing a routine deadline simply awards 0 points;
+    // it NEVER automatically deducts or wipes out Dora's earned Love Balance.
+    // Dora's earned points remain permanently steady whether she checks today or 10 days later.
     activeSlots.forEach(slot => {
-      const endMinutes = parseSlotEndMinutes(slot.timeRange);
-      if (endMinutes !== null && currentMinutes >= endMinutes) {
-        const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === todayStr);
-        const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
-        const missedKey = `[Dora] Missed Routine Task: ${slot.title} (${todayStr})`;
-        const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-        const wasDeleted = delTxs.some(id => id.includes(`missed_${todayStr}_${slot.id}`));
-        if (!hasValidSubmission && !hasLedgerMatch(missedKey) && !wasDeleted) {
-          const cutPts = Number(slot.rewardPoints || 2.0);
-          const newEntry = {
-            id: `missed_${todayStr}_${slot.id}`,
-            sl: 1,
-            target: 'user',
-            description: missedKey,
-            earnedAt: new Date().toLocaleString('en-GB'),
-            expireDate: '',
-            points: -cutPts,
-            type: 'debit',
-            remarks: 'Routine Task Deadline Expired Without Proof',
-            status: 'Deducted'
-          };
-          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          ledgerChanged = true;
-        }
-      }
+      // No automated debits. Points are only awarded upon Admin approval.
     });
 
     // 2. MORNING GREETING & MESSAGE HABITS:
