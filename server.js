@@ -687,6 +687,8 @@ io.on('connection', (socket) => {
           globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
         }
       }
+      globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+      globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
     } else if (data.action === 'OVERRIDE_BALANCE') {
       const val = parseFloat(data.newBalance) || 0;
@@ -720,8 +722,23 @@ io.on('connection', (socket) => {
         ]));
       }
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
-      // Server is the authoritative single source of truth for loveLedger.
-      // Do not merge stale client historical ledgers into the master server ledger.
+      // Preserve valid client-earned credits (e.g. approved tasks, sweet messages) across server restarts
+      if (Array.isArray(data.clientCredits) && data.clientCredits.length > 0) {
+        let creditsAdded = false;
+        const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+        for (const c of data.clientCredits) {
+          if (c && c.id && c.type === 'credit' && !delTxs.includes(c.id)) {
+            if (!(globalLoveBalanceState.loveLedger || []).some(e => e && e.id === c.id)) {
+              globalLoveBalanceState.loveLedger.unshift(c);
+              creditsAdded = true;
+            }
+          }
+        }
+        if (creditsAdded) {
+          globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+          globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+        }
+      }
       if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
         const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
         for (const w of data.clientWishRequests) {
@@ -818,6 +835,32 @@ io.on('connection', (socket) => {
         pointsAwarded: pts,
         slotTitle: data.slotTitle || 'Routine Task'
       });
+
+      // Master Server Persistence: Award Love Balance credit to Dora
+      const approvalId = 'lb_appr_' + (data.submissionId || `${data.date}_${data.slotId}`);
+      const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalId);
+      if (!alreadyAwarded && pts > 0) {
+        const slotTitle = data.slotTitle || 'Routine Task';
+        const nowStr = new Date().toLocaleString('en-GB');
+        const expDate = new Date();
+        expDate.setMonth(expDate.getMonth() + 1);
+        const creditEntry = {
+          id: approvalId,
+          sl: 1,
+          target: 'user',
+          description: `[Dora] Approved Task: ${slotTitle}`,
+          earnedAt: nowStr,
+          expireDate: expDate.toLocaleDateString('en-GB'),
+          points: pts,
+          type: 'credit',
+          remarks: `Approved Task: ${slotTitle}`,
+          status: 'Confirmed'
+        };
+        globalLoveBalanceState.loveLedger = [creditEntry, ...(globalLoveBalanceState.loveLedger || [])];
+        globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+        globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+        persistLoveState();
+      }
     } else if (data.action === 'DAILY_TASK_REJECTED' && data.submissionId) {
       if (mongoose.connection.readyState === 1) {
         DailyTaskSubmission.findOneAndUpdate(
