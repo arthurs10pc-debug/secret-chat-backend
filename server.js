@@ -69,6 +69,21 @@ function syncBalancesFromLedger() {
   globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
 }
 
+function sanitizeLedger(ledger) {
+  if (!Array.isArray(ledger)) return [];
+  return ledger.filter(item => {
+    if (!item) return false;
+    if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
+    if (item.description && (
+      item.description.includes('Announcement Read') ||
+      item.description.includes('Monthly Punctuality Reward') ||
+      item.description.includes('Daily Routine: Morning Workout') ||
+      item.description.includes('Daily Routine:')
+    )) return false;
+    return true;
+  });
+}
+
 try {
   if (fs.existsSync(LOVE_STATE_FILE)) {
     const raw = fs.readFileSync(LOVE_STATE_FILE, 'utf8');
@@ -77,17 +92,7 @@ try {
       globalLoveBalanceState = {
         loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
         adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
-        loveLedger: Array.isArray(parsed.loveLedger) 
-          ? parsed.loveLedger.filter(item => {
-              if (!item) return false;
-              if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
-              if (item.description && (
-                item.description.includes('Announcement Read') ||
-                item.description.includes('Monthly Punctuality Reward')
-              )) return false;
-              return true;
-            })
-          : [],
+        loveLedger: sanitizeLedger(parsed.loveLedger),
         wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : [],
         deletedSlotIds: Array.isArray(parsed.deletedSlotIds) ? parsed.deletedSlotIds : [],
         dailySlots: Array.isArray(parsed.dailySlots) ? parsed.dailySlots : []
@@ -112,6 +117,7 @@ const loveBalanceSchema = new mongoose.Schema({
 const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
 
 function persistLoveState() {
+  globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
   syncBalancesFromLedger();
   try {
     fs.writeFileSync(LOVE_STATE_FILE, JSON.stringify(globalLoveBalanceState, null, 2), 'utf8');
@@ -149,11 +155,7 @@ mongoose.connect(MONGO_URI)
           globalLoveBalanceState.deletedSlotIds = mergedDeleted;
         }
         if (Array.isArray(doc.loveLedger) && doc.loveLedger.length > 0) {
-          const merged = [...doc.loveLedger];
-          for (const item of (globalLoveBalanceState.loveLedger || [])) {
-            if (!merged.some(m => m && m.id === item.id)) merged.push(item);
-          }
-          globalLoveBalanceState.loveLedger = merged;
+          globalLoveBalanceState.loveLedger = sanitizeLedger(doc.loveLedger);
         }
         if (Array.isArray(doc.wishRequests) && doc.wishRequests.length > 0) {
           const mergedWishes = [...doc.wishRequests];
@@ -336,6 +338,213 @@ function broadcastPresence(room) {
   io.emit('presence_status', payload);
 }
 
+function evaluateRoutineAndHabitInfractions() {
+  try {
+    const now = new Date();
+    // Indian Standard Time (UTC+5:30)
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + istOffset);
+    const todayStr = istNow.toISOString().split('T')[0];
+    const yesterdayIst = new Date(istNow.getTime() - 86400000);
+    const yesterdayStr = yesterdayIst.toISOString().split('T')[0];
+    const currentMinutes = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+    const currentHour = istNow.getUTCHours();
+
+    const parseSlotEndMinutes = (timeRange) => {
+      if (!timeRange || typeof timeRange !== 'string') return null;
+      const parts = timeRange.split('-').map(p => p.trim());
+      if (parts.length < 2) return null;
+      const timePart = parts[1];
+      const colonIdx = timePart.indexOf(':');
+      if (colonIdx === -1) return null;
+      let h = parseInt(timePart.slice(0, colonIdx), 10);
+      let m = parseInt(timePart.slice(colonIdx + 1, colonIdx + 3) || '0', 10);
+      if (isNaN(h)) return null;
+      if (h >= 1 && h <= 7) h += 12; // 01:00 PM to 07:00 PM
+      return h * 60 + m;
+    };
+
+    const hasLedgerMatch = (keyword) => {
+      return (globalLoveBalanceState.loveLedger || []).some(e => e && e.description && e.description.includes(keyword));
+    };
+
+    const activeSlots = (memoryDailySlots || []).filter(s => s && s.isActive && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
+    let ledgerChanged = false;
+
+    // 1. TODAY'S ROUTINE TASKS DEADLINE EVALUATION
+    activeSlots.forEach(slot => {
+      const endMinutes = parseSlotEndMinutes(slot.timeRange);
+      if (endMinutes !== null && currentMinutes >= endMinutes) {
+        const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === todayStr);
+        const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
+        const missedKey = `[Dora] Missed Routine Task: ${slot.title} (${todayStr})`;
+        if (!hasValidSubmission && !hasLedgerMatch(missedKey)) {
+          const cutPts = Number(slot.rewardPoints || 2.0);
+          const newEntry = {
+            id: `missed_${todayStr}_${slot.id}`,
+            sl: 1,
+            target: 'user',
+            description: missedKey,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: -cutPts,
+            type: 'debit',
+            remarks: 'Routine Task Deadline Expired Without Proof',
+            status: 'Deducted'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        }
+      }
+    });
+
+    // 2. YESTERDAY'S ROUTINE TASKS DEADLINE EVALUATION (Catch-up for yesterday)
+    activeSlots.forEach(slot => {
+      const sub = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === yesterdayStr);
+      const hasValidSubmission = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
+      const missedYesterdayKey = `[Dora] Missed Routine Task: ${slot.title} (${yesterdayStr})`;
+      if (!hasValidSubmission && !hasLedgerMatch(missedYesterdayKey)) {
+        const cutPts = Number(slot.rewardPoints || 2.0);
+        const newEntry = {
+          id: `missed_${yesterdayStr}_${slot.id}`,
+          sl: 1,
+          target: 'user',
+          description: missedYesterdayKey,
+          earnedAt: new Date().toLocaleString('en-GB'),
+          expireDate: '',
+          points: -cutPts,
+          type: 'debit',
+          remarks: 'Routine Task Missed Yesterday',
+          status: 'Deducted'
+        };
+        globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+        ledgerChanged = true;
+      }
+    });
+
+    // 3. MORNING GREETING EVALUATION (PAST 9:00 AM IST)
+    if (currentHour >= 9) {
+      const isMorningMsg = (text) => {
+        if (!text || typeof text !== 'string') return false;
+        const lower = text.toLowerCase();
+        return lower.includes('good morning') || lower.includes('morning') || lower.includes('gm') || 
+               lower.includes('gud mrng') || lower.includes('suprabhat') || lower.includes('subah') ||
+               lower.includes('goodmrng') || lower.includes('mrg') || lower.includes('uth jao');
+      };
+
+      const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
+
+      // Dora morning check
+      const doraTodayKey = `[Dora] Missed Morning Greeting (${todayStr})`;
+      const doraTodayCreditKey = `[Dora] Morning Sweet Text (Before 9:00 AM) (${todayStr})`;
+      if (!hasLedgerMatch(doraTodayKey) && !hasLedgerMatch(doraTodayCreditKey)) {
+        const hadMorning = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+          return isDora && mDate === todayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+        });
+        if (hadMorning) {
+          const newEntry = {
+            id: `morning_credit_${todayStr}_user`,
+            sl: 1,
+            target: 'user',
+            description: doraTodayCreditKey,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: 2.0,
+            type: 'credit',
+            remarks: 'Daily Morning Sweet Greeting',
+            status: 'Confirmed'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        } else {
+          const newEntry = {
+            id: `morning_missed_${todayStr}_user`,
+            sl: 1,
+            target: 'user',
+            description: doraTodayKey,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: -2.0,
+            type: 'debit',
+            remarks: 'Missed Morning Greeting Before 9:00 AM',
+            status: 'Deducted'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        }
+      }
+
+      // Darsh morning check
+      const darshTodayKey = `[Darsh] Missed Morning Greeting (${todayStr})`;
+      const darshTodayCreditKey = `[Darsh] Morning Sweet Text (Before 9:00 AM) (${todayStr})`;
+      if (!hasLedgerMatch(darshTodayKey) && !hasLedgerMatch(darshTodayCreditKey)) {
+        const hadMorning = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+          return isDarsh && mDate === todayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+        });
+        if (hadMorning) {
+          const newEntry = {
+            id: `morning_credit_${todayStr}_admin`,
+            sl: 1,
+            target: 'admin',
+            description: darshTodayCreditKey,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: 2.0,
+            type: 'credit',
+            remarks: 'Daily Morning Sweet Greeting',
+            status: 'Confirmed'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        } else {
+          const newEntry = {
+            id: `morning_missed_${todayStr}_admin`,
+            sl: 1,
+            target: 'admin',
+            description: darshTodayKey,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: -2.0,
+            type: 'debit',
+            remarks: 'Missed Morning Greeting Before 9:00 AM',
+            status: 'Deducted'
+          };
+          globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        }
+      }
+    }
+
+    if (ledgerChanged) {
+      persistLoveState();
+      io.emit('love_balance_broadcast', {
+        action: 'SYNC_STATE_RESPONSE',
+        loveBalance: globalLoveBalanceState.loveBalance,
+        adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        wishRequests: globalLoveBalanceState.wishRequests,
+        dailySubmissions: memoryDailySubmissions,
+        dailySlots: activeSlots,
+        deletedSlotIds: globalLoveBalanceState.deletedSlotIds || []
+      });
+    }
+  } catch (err) {
+    console.error('Error in evaluateRoutineAndHabitInfractions:', err);
+  }
+}
+
 // Clean up dead/stale connections every 8 seconds
 setInterval(() => {
   const now = Date.now();
@@ -350,6 +559,10 @@ setInterval(() => {
     broadcastPresence('stealth_master_room');
   }
 }, 8000);
+
+// Periodically evaluate routine slot deadlines and morning habit infractions every 60s
+setInterval(evaluateRoutineAndHabitInfractions, 60000);
+setTimeout(evaluateRoutineAndHabitInfractions, 3000);
 
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
@@ -557,14 +770,8 @@ io.on('connection', (socket) => {
         ]));
       }
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
-
-      if (Array.isArray(data.clientLoveLedger) && data.clientLoveLedger.length > 0) {
-        const merged = [...(globalLoveBalanceState.loveLedger || [])];
-        for (const item of data.clientLoveLedger) {
-          if (item && item.id && !merged.some(m => m && m.id === item.id)) merged.push(item);
-        }
-        globalLoveBalanceState.loveLedger = merged;
-      }
+      // Server is the authoritative single source of truth for loveLedger.
+      // Do not merge stale client historical ledgers into the master server ledger.
       if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
         const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
         for (const w of data.clientWishRequests) {
