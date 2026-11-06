@@ -112,6 +112,8 @@ try {
         loveLedger: sanitizeLedger(parsed.loveLedger),
         wishRequests: Array.isArray(parsed.wishRequests) ? parsed.wishRequests : [],
         deletedSlotIds: Array.isArray(parsed.deletedSlotIds) ? parsed.deletedSlotIds : [],
+        deletedTransactionIds: Array.isArray(parsed.deletedTransactionIds) ? parsed.deletedTransactionIds : [],
+        lastClearedAt: typeof parsed.lastClearedAt === 'number' ? parsed.lastClearedAt : 0,
         dailySlots: Array.isArray(parsed.dailySlots) ? parsed.dailySlots : []
       };
       syncBalancesFromLedger();
@@ -695,11 +697,12 @@ io.on('connection', (socket) => {
       const target = data.target || 'user';
       const curr = calculateNetBalance(globalLoveBalanceState.loveLedger, target);
       const diff = parseFloat((val - curr).toFixed(2));
+      let newEntry = null;
       if (diff !== 0) {
         const type = diff > 0 ? 'credit' : 'debit';
         const numAmount = Math.abs(diff);
         const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
-        const newEntry = {
+        newEntry = {
           id: 'lb_adj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
           sl: 1,
           target,
@@ -714,6 +717,7 @@ io.on('connection', (socket) => {
         globalLoveBalanceState.loveLedger = [newEntry, ...globalLoveBalanceState.loveLedger];
       }
       persistLoveState();
+      data.newEntry = newEntry;
     } else if (data.action === 'REQUEST_SYNC') {
       if (Array.isArray(data.deletedSlotIds) && data.deletedSlotIds.length > 0) {
         globalLoveBalanceState.deletedSlotIds = Array.from(new Set([
@@ -721,20 +725,30 @@ io.on('connection', (socket) => {
           ...data.deletedSlotIds
         ]));
       }
+      if (Array.isArray(data.deletedTransactionIds) && data.deletedTransactionIds.length > 0) {
+        globalLoveBalanceState.deletedTransactionIds = Array.from(new Set([
+          ...(globalLoveBalanceState.deletedTransactionIds || []),
+          ...data.deletedTransactionIds
+        ]));
+      }
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
-      // Preserve valid client-earned credits (e.g. approved tasks, sweet messages) across server restarts
-      if (Array.isArray(data.clientCredits) && data.clientCredits.length > 0) {
-        let creditsAdded = false;
-        const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-        for (const c of data.clientCredits) {
-          if (c && c.id && c.type === 'credit' && !delTxs.includes(c.id)) {
+      const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+      // Preserve valid client-earned ledger entries (e.g. approved tasks, sweet messages, adjustments) across server restarts
+      const incomingLedger = Array.isArray(data.clientLoveLedger) && data.clientLoveLedger.length > 0
+        ? data.clientLoveLedger
+        : (Array.isArray(data.clientCredits) ? data.clientCredits : []);
+
+      if (incomingLedger.length > 0) {
+        let ledgerAdded = false;
+        for (const c of incomingLedger) {
+          if (c && c.id && !delTxs.includes(c.id)) {
             if (!(globalLoveBalanceState.loveLedger || []).some(e => e && e.id === c.id)) {
               globalLoveBalanceState.loveLedger.unshift(c);
-              creditsAdded = true;
+              ledgerAdded = true;
             }
           }
         }
-        if (creditsAdded) {
+        if (ledgerAdded) {
           globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
           globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
         }
