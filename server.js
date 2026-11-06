@@ -455,6 +455,10 @@ setTimeout(evaluateRoutineAndHabitInfractions, 3000);
 // High-frequency 4-second authoritative sync heartbeat broadcast across all devices
 setInterval(() => {
   const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+  // Ensure ledger is clean and mathematical totals reflect reality
+  globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
+  globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+  globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
   io.emit('love_balance_heartbeat_sync', {
     loveBalance: globalLoveBalanceState.loveBalance,
     adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
@@ -654,11 +658,17 @@ io.on('connection', (socket) => {
       persistLoveState();
     } else if (data.action === 'TRANSACTION') {
       if (data.newEntry) {
+        const isPhantomDebit = data.newEntry.type === 'debit' && data.newEntry.description && (
+          data.newEntry.description.includes('Missed Morning Greeting') ||
+          data.newEntry.description.includes('Sleeping Without "Good Night"') ||
+          data.newEntry.description.includes('Missed Routine Task')
+        );
         const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-        if (!delTxs.includes(data.newEntry.id)) {
+        if (!isPhantomDebit && !delTxs.includes(data.newEntry.id)) {
           globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
         }
       }
+      globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
@@ -718,10 +728,10 @@ io.on('connection', (socket) => {
             }
           }
         }
-        if (ledgerAdded) {
-          globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
-          globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
-        }
+        globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
+        globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+        globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+        persistLoveState();
       }
       if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
         const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
