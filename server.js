@@ -856,6 +856,22 @@ io.on('connection', (socket) => {
         globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
         globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
         persistLoveState();
+        if (ledgerAdded) {
+          io.emit('love_balance_heartbeat_sync', {
+            loveBalance: globalLoveBalanceState.loveBalance,
+            adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            currentLoveBalance: globalLoveBalanceState.loveBalance,
+            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            loveLedger: globalLoveBalanceState.loveLedger,
+            wishRequests: globalLoveBalanceState.wishRequests,
+            dailySubmissions: memoryDailySubmissions,
+            dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
+            deletedSlotIds: activeDeleted,
+            deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+            lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+            serverTimestamp: Date.now()
+          });
+        }
       }
       if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
         const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
@@ -1171,10 +1187,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('daily_task_approve', async ({ submissionId, slotId, date, points, feedback, slotTitle }) => {
+  socket.on('daily_task_approve', async (payload) => {
     try {
+      const { submissionId, slotId, date, feedback, slotTitle } = payload || {};
       if (!submissionId && !slotId) return;
-      const pts = parseFloat(points) || 0;
+      const pts = parseFloat(payload?.points ?? payload?.pointsAwarded) || 2.0;
       let updatedSubmission = null;
 
       if (mongoose.connection.readyState === 1) {
@@ -1245,6 +1262,21 @@ io.on('connection', (socket) => {
             newEntry,
             currentLoveBalance: globalLoveBalanceState.loveBalance,
             currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            serverTimestamp: Date.now()
+          });
+
+          io.emit('love_balance_heartbeat_sync', {
+            loveBalance: globalLoveBalanceState.loveBalance,
+            adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            currentLoveBalance: globalLoveBalanceState.loveBalance,
+            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            loveLedger: globalLoveBalanceState.loveLedger,
+            wishRequests: globalLoveBalanceState.wishRequests,
+            dailySubmissions: memoryDailySubmissions,
+            dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
+            deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+            deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+            lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
             serverTimestamp: Date.now()
           });
         }
