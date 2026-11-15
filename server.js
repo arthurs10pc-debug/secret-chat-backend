@@ -73,21 +73,12 @@ function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
   return ledger.filter(item => {
     if (!item) return false;
+    // Purge legacy mock template items
     if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
     if (item.description && (
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
     )) return false;
-
-    // Purge phantom auto-generated habit & routine penalties so Dora's earned points stay permanent
-    if (item.type === 'debit' && item.description && (
-      item.description.includes('Missed Morning Greeting') ||
-      item.description.includes('Sleeping Without "Good Night"') ||
-      item.description.includes('Missed Routine Task')
-    )) {
-      return false;
-    }
-
     return true;
   });
 }
@@ -367,8 +358,6 @@ function evaluateRoutineAndHabitInfractions() {
     const istOffset = 5.5 * 60 * 60 * 1000;
     const istNow = new Date(now.getTime() + istOffset);
     const todayStr = istNow.toISOString().split('T')[0];
-    const yesterdayIst = new Date(istNow.getTime() - 86400000);
-    const yesterdayStr = yesterdayIst.toISOString().split('T')[0];
     const currentMinutes = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
     const currentHour = istNow.getUTCHours();
 
@@ -386,34 +375,174 @@ function evaluateRoutineAndHabitInfractions() {
       return h * 60 + m;
     };
 
-    const hasLedgerMatch = (keyword) => {
-      return (globalLoveBalanceState.loveLedger || []).some(e => e && e.description && e.description.includes(keyword));
+    const isMorningMsg = (text) => {
+      if (!text || typeof text !== 'string') return false;
+      const lower = text.toLowerCase();
+      return lower.includes('good morning') || lower.includes('morning') || lower.includes('gm') || 
+             lower.includes('gud mrng') || lower.includes('suprabhat') || lower.includes('subah') ||
+             lower.includes('goodmrng') || lower.includes('mrg') || lower.includes('uth jao');
     };
 
+    const isGoodNightMsg = (text) => {
+      if (!text || typeof text !== 'string') return false;
+      const lower = text.toLowerCase();
+      return lower.includes('good night') || lower.includes('goodnight') || lower.includes('gn') || 
+             lower.includes('gud nite') || lower.includes('sweet dreams') || lower.includes('shubh ratri') || 
+             lower.includes('sleep tight') || lower.includes('so jao') || lower.includes('sleep well') ||
+             lower.includes('gnight') || lower.includes('night') || lower.includes('shubhratri');
+    };
+
+    const lastCleared = globalLoveBalanceState.lastClearedAt || 0;
+    const clearedDateStr = lastCleared > 0 ? new Date(lastCleared + istOffset).toISOString().split('T')[0] : '';
+    const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
     const activeSlots = (memoryDailySlots || []).filter(s => s && s.isActive && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
     let ledgerChanged = false;
 
-    // 1. TODAY'S ROUTINE TASKS DEADLINE EVALUATION
-    const lastCleared = globalLoveBalanceState.lastClearedAt || 0;
-    if (lastCleared > 0) {
-      const clearedDate = new Date(lastCleared + istOffset).toISOString().split('T')[0];
-      if (clearedDate >= todayStr) {
-        // Cleared today! Forgive all routine penalties for today; only resume next day!
-        return;
+    const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
+
+    const hasEntry = (id, descSnippet, target) => {
+      if (delTxs.includes(id)) return true;
+      return (globalLoveBalanceState.loveLedger || []).some(e => {
+        if (!e) return false;
+        if (e.id === id) return true;
+        if (target && e.target !== target) return false;
+        if (descSnippet && e.description && e.description.includes(descSnippet)) return true;
+        return false;
+      });
+    };
+
+    const addHabitEntry = (id, target, type, amount, description, remarks, dateStr) => {
+      if (hasEntry(id, description, target)) return;
+      const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
+      const newEntry = {
+        id,
+        sl: 1,
+        target,
+        description: `[${targetLabel}] ${description}`,
+        earnedAt: `${dateStr}, 12:00 pm`,
+        expireDate: '',
+        points: type === 'credit' ? Math.abs(amount) : -Math.abs(amount),
+        type,
+        remarks,
+        status: type === 'credit' ? 'Confirmed' : 'Deducted'
+      };
+      globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
+      ledgerChanged = true;
+    };
+
+    // Evaluate past 14 days up to today
+    for (let i = 14; i >= 0; i--) {
+      const d = new Date(istNow.getTime() - i * 86400000);
+      const dayStr = d.toISOString().split('T')[0];
+      if (clearedDateStr && dayStr <= clearedDateStr) continue;
+
+      const nextDayStr = new Date(d.getTime() + 86400000).toISOString().split('T')[0];
+      const isPastDay = dayStr < todayStr;
+      const isToday = dayStr === todayStr;
+
+      // 1. MORNING GREETING (5:00 AM - 9:00 AM)
+      if (isPastDay || (isToday && currentHour >= 9)) {
+        // Dora morning check
+        const doraMId = `habit_morning_${dayStr}_user`;
+        if (!hasEntry(doraMId, `Morning`, 'user')) {
+          const hadDoraMorning = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+            return isDora && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+          });
+          if (hadDoraMorning) {
+            addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
+          } else {
+            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
+          }
+        }
+
+        // Darsh morning check
+        const darshMId = `habit_morning_${dayStr}_admin`;
+        if (!hasEntry(darshMId, `Morning`, 'admin')) {
+          const hadDarshMorning = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+            return isDarsh && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+          });
+          if (hadDarshMorning) {
+            addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
+          } else {
+            addHabitEntry(darshMId, 'admin', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
+          }
+        }
       }
+
+      // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning) - only for completed days
+      if (isPastDay) {
+        // Dora night check
+        const doraNId = `habit_night_${dayStr}_user`;
+        if (!hasEntry(doraNId, `Good Night`, 'user')) {
+          const hadDoraNight = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+            const eve = mDate === dayStr && mHour >= 20;
+            const wee = mDate === nextDayStr && mHour < 5;
+            return isDora && (eve || wee) && isGoodNightMsg(m.text || '');
+          });
+          if (hadDoraNight) {
+            addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
+          } else {
+            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
+          }
+        }
+
+        // Darsh night check
+        const darshNId = `habit_night_${dayStr}_admin`;
+        if (!hasEntry(darshNId, `Good Night`, 'admin')) {
+          const hadDarshNight = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+            const eve = mDate === dayStr && mHour >= 20;
+            const wee = mDate === nextDayStr && mHour < 5;
+            return isDarsh && (eve || wee) && isGoodNightMsg(m.text || '');
+          });
+          if (hadDarshNight) {
+            addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
+          } else {
+            addHabitEntry(darshNId, 'admin', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
+          }
+        }
+      }
+
+      // 3. DAILY ROUTINE TASKS (DORA ONLY)
+      activeSlots.forEach(slot => {
+        const slotEndMinutes = parseSlotEndMinutes(slot.timeRange);
+        const shouldCheckSlot = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes >= slotEndMinutes);
+        if (shouldCheckSlot) {
+          const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
+          const slotDesc = `Routine Task: ${slot.title} (${dayStr})`;
+          if (!hasEntry(slotTxId, slotDesc, 'user')) {
+            const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
+            const isSubmitted = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
+            if (!isSubmitted) {
+              addHabitEntry(slotTxId, 'user', 'debit', 2.00, `Missed Routine Task: ${slot.title} (${dayStr})`, `Missed Routine Task Deadline (${slot.timeRange})`, dayStr);
+            }
+          }
+        }
+      });
     }
 
-    // Routine Task Slot Deadlines: In production, missing a routine deadline simply awards 0 points;
-    // it NEVER automatically deducts or wipes out Dora's earned Love Balance.
-    // Dora's earned points remain permanently steady whether she checks today or 10 days later.
-    activeSlots.forEach(slot => {
-      // No automated debits. Points are only awarded upon Admin approval.
-    });
-
-    // 2. MORNING GREETING & MESSAGE HABITS:
-    // Handled authoritatively by clients who possess the decryption key for end-to-end encrypted messages.
-
     if (ledgerChanged) {
+      globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+      globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
       io.emit('love_balance_broadcast', {
         action: 'SYNC_STATE_RESPONSE',
@@ -658,13 +787,8 @@ io.on('connection', (socket) => {
       persistLoveState();
     } else if (data.action === 'TRANSACTION') {
       if (data.newEntry) {
-        const isPhantomDebit = data.newEntry.type === 'debit' && data.newEntry.description && (
-          data.newEntry.description.includes('Missed Morning Greeting') ||
-          data.newEntry.description.includes('Sleeping Without "Good Night"') ||
-          data.newEntry.description.includes('Missed Routine Task')
-        );
         const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-        if (!isPhantomDebit && !delTxs.includes(data.newEntry.id)) {
+        if (!delTxs.includes(data.newEntry.id)) {
           globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
         }
       }
