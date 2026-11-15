@@ -71,16 +71,20 @@ function syncBalancesFromLedger() {
 
 function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
-  return ledger.filter(item => {
-    if (!item) return false;
-    // Purge legacy mock template items
-    if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) return false;
+  const seen = new Set();
+  const cleaned = [];
+  for (const item of ledger) {
+    if (!item) continue;
+    if (item.id && seen.has(item.id)) continue;
+    if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) continue;
     if (item.description && (
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
-    )) return false;
-    return true;
-  });
+    )) continue;
+    if (item.id) seen.add(item.id);
+    cleaned.push(item);
+  }
+  return cleaned;
 }
 
 try {
@@ -881,70 +885,13 @@ io.on('connection', (socket) => {
       }
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
       const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-      // Preserve valid client-earned ledger entries (e.g. approved tasks, sweet messages, adjustments) across server restarts
-      const incomingLedger = Array.isArray(data.clientLoveLedger) && data.clientLoveLedger.length > 0
-        ? data.clientLoveLedger
-        : (Array.isArray(data.clientCredits) ? data.clientCredits : []);
-
-      if (incomingLedger.length > 0) {
-        let ledgerAdded = false;
-        for (const c of incomingLedger) {
-          if (c && c.id && !delTxs.includes(c.id)) {
-            if (globalLoveBalanceState.lastClearedAt > 0) {
-              const itemTime = c.timestamp || (c.earnedAt ? new Date(c.earnedAt).getTime() : 0);
-              if (itemTime > 0 && itemTime <= globalLoveBalanceState.lastClearedAt) {
-                continue;
-              }
-            }
-            if (!(globalLoveBalanceState.loveLedger || []).some(e => e && e.id === c.id)) {
-              globalLoveBalanceState.loveLedger.unshift(c);
-              ledgerAdded = true;
-            }
-          }
-        }
-        globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
-        globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
-        globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
-        persistLoveState();
-        if (ledgerAdded) {
-          io.emit('love_balance_heartbeat_sync', {
-            loveBalance: globalLoveBalanceState.loveBalance,
-            adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-            currentLoveBalance: globalLoveBalanceState.loveBalance,
-            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-            loveLedger: globalLoveBalanceState.loveLedger,
-            wishRequests: globalLoveBalanceState.wishRequests,
-            dailySubmissions: memoryDailySubmissions,
-            dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
-            deletedSlotIds: activeDeleted,
-            deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
-            lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
-            serverTimestamp: Date.now()
-          });
-        }
-      }
-      if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
-        const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
-        for (const w of data.clientWishRequests) {
-          if (w && w.id && !mergedW.some(m => m && m.id === w.id)) mergedW.push(w);
-        }
-        globalLoveBalanceState.wishRequests = mergedW;
-      }
-      if (Array.isArray(data.clientSubmissions) && data.clientSubmissions.length > 0) {
-        for (const sub of data.clientSubmissions) {
-          if (sub && sub.id) {
-            const idx = memoryDailySubmissions.findIndex(s => s.id === sub.id);
-            if (idx >= 0) memoryDailySubmissions[idx] = sub;
-            else memoryDailySubmissions.push(sub);
-          }
-        }
-      }
-      if (Array.isArray(data.clientSlots) && data.clientSlots.length > 0) {
-        memoryDailySlots = data.clientSlots.filter(s => s && s.id && !activeDeleted.includes(s.id));
-        globalLoveBalanceState.dailySlots = memoryDailySlots;
-      }
+      
+      // Filter out any deleted transactions strictly
+      globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger).filter(e => e && !delTxs.includes(e.id));
+      syncBalancesFromLedger();
       persistLoveState();
 
+      // Immediately respond with authoritative master state to the requesting client
       socket.emit('love_balance_broadcast', {
         action: 'SYNC_STATE_RESPONSE',
         loveBalance: globalLoveBalanceState.loveBalance,
@@ -957,8 +904,17 @@ io.on('connection', (socket) => {
         dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
         deletedSlotIds: activeDeleted,
         deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
-        lastClearedAt: globalLoveBalanceState.lastClearedAt || 0
+        lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+        serverTimestamp: Date.now()
       });
+
+      if (Array.isArray(data.clientWishRequests) && data.clientWishRequests.length > 0) {
+        const mergedW = [...(globalLoveBalanceState.wishRequests || [])];
+        for (const w of data.clientWishRequests) {
+          if (w && w.id && !mergedW.some(m => m && m.id === w.id)) mergedW.push(w);
+        }
+        globalLoveBalanceState.wishRequests = mergedW;
+      }
       return;
     } else if (data.action === 'DAILY_TASK_SUBMIT' && data.submission) {
       const sub = data.submission;
