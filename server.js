@@ -154,6 +154,19 @@ mongoose.connect(MONGO_URI)
   .then(async () => {
     console.log("Connected to MongoDB successfully.");
     try {
+      // Pre-load past 30 days messages & submissions so habit evaluation and history are 100% accurate
+      const past30Days = new Date(Date.now() - 30 * 86400000);
+      const dbMsgs = await Message.find({ timestamp: { $gte: past30Days } }).lean();
+      if (Array.isArray(dbMsgs) && dbMsgs.length > 0) {
+        memoryMessages.length = 0;
+        memoryMessages.push(...dbMsgs);
+      }
+      const dbSubs = await DailyTaskSubmission.find({ createdAt: { $gte: past30Days } }).lean();
+      if (Array.isArray(dbSubs) && dbSubs.length > 0) {
+        memoryDailySubmissions.length = 0;
+        memoryDailySubmissions.push(...dbSubs);
+      }
+
       const doc = await LoveBalanceModel.findOne({ key: 'global_state' });
       if (doc) {
         if (Array.isArray(doc.deletedSlotIds) && doc.deletedSlotIds.length > 0) {
@@ -400,19 +413,21 @@ function evaluateRoutineAndHabitInfractions() {
 
     const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
 
-    const hasEntry = (id, descSnippet, target) => {
+    const hasEntry = (id, target, dateStr, keyword) => {
       if (delTxs.includes(id)) return true;
       return (globalLoveBalanceState.loveLedger || []).some(e => {
         if (!e) return false;
         if (e.id === id) return true;
         if (target && e.target !== target) return false;
-        if (descSnippet && e.description && e.description.includes(descSnippet)) return true;
+        if (dateStr && e.description && e.description.includes(dateStr)) {
+          if (!keyword || e.description.includes(keyword)) return true;
+        }
         return false;
       });
     };
 
     const addHabitEntry = (id, target, type, amount, description, remarks, dateStr) => {
-      if (hasEntry(id, description, target)) return;
+      if (hasEntry(id, target, dateStr, description)) return;
       const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
       const newEntry = {
         id,
@@ -444,7 +459,7 @@ function evaluateRoutineAndHabitInfractions() {
       if (isPastDay || (isToday && currentHour >= 9)) {
         // Dora morning check
         const doraMId = `habit_morning_${dayStr}_user`;
-        if (!hasEntry(doraMId, `Morning`, 'user')) {
+        if (!hasEntry(doraMId, 'user', dayStr, 'Morning')) {
           const hadDoraMorning = msgs.some(m => {
             if (!m || !m.timestamp) return false;
             const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
@@ -462,7 +477,7 @@ function evaluateRoutineAndHabitInfractions() {
 
         // Darsh morning check
         const darshMId = `habit_morning_${dayStr}_admin`;
-        if (!hasEntry(darshMId, `Morning`, 'admin')) {
+        if (!hasEntry(darshMId, 'admin', dayStr, 'Morning')) {
           const hadDarshMorning = msgs.some(m => {
             if (!m || !m.timestamp) return false;
             const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
@@ -483,7 +498,7 @@ function evaluateRoutineAndHabitInfractions() {
       if (isPastDay) {
         // Dora night check
         const doraNId = `habit_night_${dayStr}_user`;
-        if (!hasEntry(doraNId, `Good Night`, 'user')) {
+        if (!hasEntry(doraNId, 'user', dayStr, 'Good Night')) {
           const hadDoraNight = msgs.some(m => {
             if (!m || !m.timestamp) return false;
             const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
@@ -503,7 +518,7 @@ function evaluateRoutineAndHabitInfractions() {
 
         // Darsh night check
         const darshNId = `habit_night_${dayStr}_admin`;
-        if (!hasEntry(darshNId, `Good Night`, 'admin')) {
+        if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night')) {
           const hadDarshNight = msgs.some(m => {
             if (!m || !m.timestamp) return false;
             const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
@@ -528,8 +543,7 @@ function evaluateRoutineAndHabitInfractions() {
         const shouldCheckSlot = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes >= slotEndMinutes);
         if (shouldCheckSlot) {
           const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
-          const slotDesc = `Routine Task: ${slot.title} (${dayStr})`;
-          if (!hasEntry(slotTxId, slotDesc, 'user')) {
+          if (!hasEntry(slotTxId, 'user', dayStr, slot.title)) {
             const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
             const isSubmitted = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
             if (!isSubmitted) {
@@ -539,6 +553,36 @@ function evaluateRoutineAndHabitInfractions() {
         }
       });
     }
+
+    // 4. ENSURE ALL APPROVED ROUTINE TASKS ARE CREDITED TO DORA
+    (memoryDailySubmissions || []).forEach(sub => {
+      if (sub && sub.status === 'APPROVED' && (sub.pointsAwarded > 0 || sub.points > 0)) {
+        const pts = parseFloat(sub.pointsAwarded || sub.points || 2.0);
+        const subDate = sub.date || todayStr;
+        if (clearedDateStr && subDate <= clearedDateStr) return;
+        const approvalEntryId = 'lb_appr_' + (sub.id || `${subDate}_${sub.slotId}`);
+        if (delTxs.includes(approvalEntryId)) return;
+        const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalEntryId);
+        if (!alreadyAwarded) {
+          const slot = (memoryDailySlots || []).find(s => s && s.id === sub.slotId);
+          const taskName = sub.slotTitle || (slot ? slot.title : 'Routine Task');
+          const entry = {
+            id: approvalEntryId,
+            sl: 1,
+            target: 'user',
+            description: `[Dora] Approved Task: ${taskName}`,
+            earnedAt: `${subDate}, 12:00 pm`,
+            expireDate: '',
+            points: pts,
+            type: 'credit',
+            remarks: `Approved Task: ${taskName}`,
+            status: 'Confirmed'
+          };
+          globalLoveBalanceState.loveLedger = [entry, ...(globalLoveBalanceState.loveLedger || [])];
+          ledgerChanged = true;
+        }
+      }
+    });
 
     if (ledgerChanged) {
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
@@ -846,6 +890,12 @@ io.on('connection', (socket) => {
         let ledgerAdded = false;
         for (const c of incomingLedger) {
           if (c && c.id && !delTxs.includes(c.id)) {
+            if (globalLoveBalanceState.lastClearedAt > 0) {
+              const itemTime = c.timestamp || (c.earnedAt ? new Date(c.earnedAt).getTime() : 0);
+              if (itemTime > 0 && itemTime <= globalLoveBalanceState.lastClearedAt) {
+                continue;
+              }
+            }
             if (!(globalLoveBalanceState.loveLedger || []).some(e => e && e.id === c.id)) {
               globalLoveBalanceState.loveLedger.unshift(c);
               ledgerAdded = true;
@@ -1230,13 +1280,11 @@ io.on('connection', (socket) => {
         memoryDailySubmissions.push(updatedSubmission);
       }
 
-      // Award Love Balance points to Dora (deduplicated by submission ID)
+      // Award Love Balance points to Dora (deduplicated strictly by approval ID)
       if (pts > 0) {
         const approvalEntryId = 'lb_appr_' + (submissionId || `${date || new Date().toISOString().split('T')[0]}_${slotId}`);
-        const taskName = slotTitle || updatedSubmission.slotTitle || 'Daily Routine Task';
-        const alreadyExists = (globalLoveBalanceState.loveLedger || []).some(e => 
-          e && (e.id === approvalEntryId || (e.description && e.description.includes(`Approved Task: ${taskName}`) && e.earnedAt && e.earnedAt.startsWith(new Date().toLocaleDateString('en-GB'))))
-        );
+        const taskName = slotTitle || (updatedSubmission && updatedSubmission.slotTitle) || 'Daily Routine Task';
+        const alreadyExists = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalEntryId);
         if (!alreadyExists) {
           const newEntry = {
             id: approvalEntryId,
@@ -1260,6 +1308,7 @@ io.on('connection', (socket) => {
             type: 'credit',
             reason: 'Daily Task Approved: ' + taskName,
             newEntry,
+            loveLedger: globalLoveBalanceState.loveLedger,
             currentLoveBalance: globalLoveBalanceState.loveBalance,
             currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
             serverTimestamp: Date.now()
