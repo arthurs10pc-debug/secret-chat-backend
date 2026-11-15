@@ -61,7 +61,8 @@ function calculateNetBalance(ledger, target = 'user') {
     .filter(e => e.type === 'redeem' || e.status === 'Redeemed')
     .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
 
-  return parseFloat((credits - debits - redeems).toFixed(2));
+  const net = parseFloat((credits - debits - redeems).toFixed(2));
+  return Math.max(0, net);
 }
 
 function syncBalancesFromLedger() {
@@ -76,11 +77,28 @@ function sanitizeLedger(ledger) {
   for (const item of ledger) {
     if (!item) continue;
     if (item.id && seen.has(item.id)) continue;
+    // Purge legacy mock template items
     if (item.id && /^lb_([1-9]|1[0-1])$/.test(item.id)) continue;
     if (item.description && (
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
     )) continue;
+    // Purge ANY auto-debit habit/missed penalties
+    if (item.type === 'debit') {
+      const idStr = String(item.id || '');
+      const desc = String(item.description || '');
+      const rem = String(item.remarks || '');
+      if (
+        idStr.startsWith('habit_') || 
+        idStr.startsWith('penalty_') ||
+        desc.includes('Missed ') || 
+        desc.includes('Sleeping Without') ||
+        rem.includes('Missed ') ||
+        rem.includes('Sleeping Without')
+      ) {
+        continue;
+      }
+    }
     if (item.id) seen.add(item.id);
     cleaned.push(item);
   }
@@ -348,6 +366,69 @@ app.get('/api/yt-search', async (req, res) => {
   res.json({ videoId: null, title: query });
 });
 
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  name: { type: String, default: '' },
+  originalName: { type: String, default: '' },
+  role: { type: String, default: 'user' },
+  picture: { type: String, default: '' },
+  lastLogin: { type: Date, default: Date.now }
+});
+
+const UserModel = mongoose.model('User', userSchema);
+
+app.post('/api/auth/google-login', async (req, res) => {
+  try {
+    const { email, name, picture } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    const cleanEmail = email.toLowerCase().trim();
+    const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
+    const role = isAdmin ? 'parent' : 'user';
+    const displayName = isAdmin ? 'Darsh' : 'Dora';
+
+    const userObj = {
+      email: cleanEmail,
+      name: displayName,
+      originalName: name || '',
+      role,
+      picture: picture || '',
+      isAdmin,
+      lastLogin: new Date()
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await UserModel.findOneAndUpdate(
+          { email: cleanEmail },
+          userObj,
+          { upsert: true, new: true }
+        );
+      } catch (err) {
+        console.warn('Could not save user in mongo:', err.message);
+      }
+    }
+
+    return res.json({ success: true, user: userObj });
+  } catch (e) {
+    console.error('Google login error:', e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/auth/current-user', (req, res) => {
+  const email = (req.query.email || '').toLowerCase().trim();
+  if (!email) return res.json({ user: null });
+  const isAdmin = email === 'arthurs10pc@gmail.com';
+  return res.json({
+    user: {
+      email,
+      role: isAdmin ? 'parent' : 'user',
+      name: isAdmin ? 'Darsh' : 'Dora',
+      isAdmin
+    }
+  });
+});
+
 // --- REAL-TIME USER PRESENCE TRACKING ---
 const activeRoomUsers = new Map(); // socket.id -> { room, role, isForeground: true, lastHeartbeat: timestamp }
 
@@ -459,7 +540,7 @@ function evaluateRoutineAndHabitInfractions() {
       const isPastDay = dayStr < todayStr;
       const isToday = dayStr === todayStr;
 
-      // 1. MORNING GREETING (5:00 AM - 9:00 AM)
+      // 1. MORNING GREETING (5:00 AM - 9:00 AM) - CREDITS ONLY
       if (isPastDay || (isToday && currentHour >= 9)) {
         // Dora morning check
         const doraMId = `habit_morning_${dayStr}_user`;
@@ -474,8 +555,6 @@ function evaluateRoutineAndHabitInfractions() {
           });
           if (hadDoraMorning) {
             addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
-          } else {
-            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
           }
         }
 
@@ -492,13 +571,11 @@ function evaluateRoutineAndHabitInfractions() {
           });
           if (hadDarshMorning) {
             addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
-          } else {
-            addHabitEntry(darshMId, 'admin', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
           }
         }
       }
 
-      // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning) - only for completed days
+      // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning) - CREDITS ONLY
       if (isPastDay) {
         // Dora night check
         const doraNId = `habit_night_${dayStr}_user`;
@@ -515,8 +592,6 @@ function evaluateRoutineAndHabitInfractions() {
           });
           if (hadDoraNight) {
             addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
-          } else {
-            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
           }
         }
 
@@ -535,27 +610,11 @@ function evaluateRoutineAndHabitInfractions() {
           });
           if (hadDarshNight) {
             addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
-          } else {
-            addHabitEntry(darshNId, 'admin', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
           }
         }
       }
 
-      // 3. DAILY ROUTINE TASKS (DORA ONLY)
-      activeSlots.forEach(slot => {
-        const slotEndMinutes = parseSlotEndMinutes(slot.timeRange);
-        const shouldCheckSlot = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes >= slotEndMinutes);
-        if (shouldCheckSlot) {
-          const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
-          if (!hasEntry(slotTxId, 'user', dayStr, slot.title)) {
-            const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
-            const isSubmitted = sub && (sub.status === 'APPROVED' || sub.status === 'PENDING') && Boolean(sub.image || sub.note);
-            if (!isSubmitted) {
-              addHabitEntry(slotTxId, 'user', 'debit', 2.00, `Missed Routine Task: ${slot.title} (${dayStr})`, `Missed Routine Task Deadline (${slot.timeRange})`, dayStr);
-            }
-          }
-        }
-      });
+      // 3. DAILY ROUTINE TASKS - ONLY REWARDED UPON ADMIN APPROVAL, NO AUTO-DEBITS EVER
     }
 
     // 4. ENSURE ALL APPROVED ROUTINE TASKS ARE CREDITED TO DORA
