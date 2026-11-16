@@ -31,7 +31,7 @@ const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mo
 const LOVE_STATE_FILE = path.join(__dirname, 'love_balance_state.json');
 
 let globalLoveBalanceState = {
-  activeDoraEmail: 'dora@gmail.com',
+  activeDoraEmail: '',
   loveBalance: 0,
   adminLoveBalance: 0,
   loveLedger: [],
@@ -112,7 +112,7 @@ try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
       globalLoveBalanceState = {
-        activeDoraEmail: parsed.activeDoraEmail || 'dora@gmail.com',
+        activeDoraEmail: (parsed.activeDoraEmail && parsed.activeDoraEmail.toLowerCase() !== 'dora@gmail.com') ? parsed.activeDoraEmail : '',
         loveBalance: typeof parsed.loveBalance === 'number' ? parsed.loveBalance : 0,
         adminLoveBalance: typeof parsed.adminLoveBalance === 'number' ? parsed.adminLoveBalance : 0,
         loveLedger: sanitizeLedger(parsed.loveLedger),
@@ -131,7 +131,7 @@ try {
 
 const loveBalanceSchema = new mongoose.Schema({
   key: { type: String, default: 'global_state', unique: true },
-  activeDoraEmail: { type: String, default: 'dora@gmail.com' },
+  activeDoraEmail: { type: String, default: '' },
   loveBalance: { type: Number, default: 0 },
   adminLoveBalance: { type: Number, default: 0 },
   loveLedger: { type: Array, default: [] },
@@ -145,6 +145,9 @@ const loveBalanceSchema = new mongoose.Schema({
 const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
 
 function persistLoveState() {
+  if (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === 'dora@gmail.com') {
+    globalLoveBalanceState.activeDoraEmail = '';
+  }
   const deletedTxs = globalLoveBalanceState.deletedTransactionIds || [];
   globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger).filter(item => item && !deletedTxs.includes(item.id));
   syncBalancesFromLedger();
@@ -158,7 +161,7 @@ function persistLoveState() {
       LoveBalanceModel.findOneAndUpdate(
         { key: 'global_state' },
         {
-          activeDoraEmail: globalLoveBalanceState.activeDoraEmail || 'dora@gmail.com',
+          activeDoraEmail: (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() !== 'dora@gmail.com') ? globalLoveBalanceState.activeDoraEmail : '',
           loveBalance: globalLoveBalanceState.loveBalance,
           adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
           loveLedger: globalLoveBalanceState.loveLedger,
@@ -219,17 +222,31 @@ mongoose.connect(MONGO_URI)
         if (Array.isArray(doc.dailySlots) && doc.dailySlots.length > 0) {
           globalLoveBalanceState.dailySlots = doc.dailySlots.filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
         }
-        if (doc.activeDoraEmail) {
+        if (doc.activeDoraEmail && doc.activeDoraEmail.toLowerCase() !== 'dora@gmail.com') {
           globalLoveBalanceState.activeDoraEmail = doc.activeDoraEmail;
+        } else {
+          globalLoveBalanceState.activeDoraEmail = '';
         }
         persistLoveState();
         console.log("Synchronized Love Balance from MongoDB: Dora ₹", globalLoveBalanceState.loveBalance, "| Darsh ₹", globalLoveBalanceState.adminLoveBalance);
       }
 
-      // Preload all registered users from MongoDB into memoryUsers
-      const dbUsers = await UserModel.find({}).lean();
+      // Permanently purge mock/demo account 'dora@gmail.com' from Mongo
+      await UserModel.deleteMany({ email: { $in: ['dora@gmail.com', 'dora'] } }).catch(() => {});
+      memoryUsers.delete('dora@gmail.com');
+      if (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === 'dora@gmail.com') {
+        globalLoveBalanceState.activeDoraEmail = '';
+      }
+
+      // Preload all registered users from MongoDB into memoryUsers (excluding any demo id)
+      const dbUsers = await UserModel.find({ email: { $ne: 'dora@gmail.com' } }).lean();
       if (Array.isArray(dbUsers) && dbUsers.length > 0) {
         dbUsers.forEach(u => {
+          if (u && u.email && u.email.toLowerCase() !== 'dora@gmail.com') {
+            memoryUsers.set(u.email.toLowerCase(), { ...u, email: u.email.toLowerCase() });
+          }
+        });
+      }
           if (u && u.email) {
             const k = u.email.toLowerCase();
             const isAdmin = k === 'arthurs10pc@gmail.com';
@@ -451,26 +468,15 @@ memoryUsers.set('arthurs10pc@gmail.com', {
   loveLedger: [],
   lastLogin: new Date()
 });
-memoryUsers.set('dora@gmail.com', {
-  email: 'dora@gmail.com',
-  name: 'Dora',
-  firstName: 'Dora',
-  fullName: 'Dora (User)',
-  originalName: 'Dora (User)',
-  role: 'user',
-  isAdmin: false,
-  isDora: true,
-  picture: '',
-  loveBalance: 25.0,
-  loveLedger: [],
-  lastLogin: new Date()
-});
 
 app.post('/api/auth/google-login', async (req, res) => {
   try {
     const { email, name, picture } = req.body || {};
     if (!email) return res.status(400).json({ error: 'Email is required' });
     const cleanEmail = email.toLowerCase().trim();
+    if (cleanEmail === 'dora@gmail.com') {
+      return res.status(400).json({ error: 'Demo account is disabled. Please login with a real Gmail account.' });
+    }
     const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
     const role = isAdmin ? 'parent' : 'user';
     const fullName = name || (isAdmin ? 'Darsh' : 'User');
@@ -484,7 +490,7 @@ app.post('/api/auth/google-login', async (req, res) => {
         existing = await UserModel.findOne({ email: cleanEmail }).lean();
       } catch (err) {}
     }
-    const isDora = existing ? Boolean(existing.isDora) : (cleanEmail === 'dora@gmail.com');
+    const isDora = existing ? Boolean(existing.isDora) : false;
     const incomingBal = typeof req.body.loveBalance === 'number' ? req.body.loveBalance : parseFloat(req.body.loveBalance);
     const incomingLedger = Array.isArray(req.body.loveLedger) ? req.body.loveLedger : [];
 
@@ -493,8 +499,6 @@ app.post('/api/auth/google-login', async (req, res) => {
       userLoveBalance = incomingBal;
     } else if (typeof existing?.loveBalance === 'number' && existing.loveBalance > 0) {
       userLoveBalance = existing.loveBalance;
-    } else if (cleanEmail === 'dora@gmail.com') {
-      userLoveBalance = 25.0;
     }
     const userLoveLedger = incomingLedger.length > 0 ? incomingLedger : (Array.isArray(existing?.loveLedger) ? existing.loveLedger : []);
 
@@ -590,7 +594,7 @@ async function switchActiveDora(cleanEmail, isDora = true, adminEmail = 'arthurs
       isAdmin: false,
       isDora: Boolean(isDora),
       picture: '',
-      loveBalance: cleanEmail === 'dora@gmail.com' ? 25.0 : 0,
+      loveBalance: 0,
       loveLedger: [],
       lastLogin: new Date()
     };
@@ -646,8 +650,6 @@ async function switchActiveDora(cleanEmail, isDora = true, adminEmail = 'arthurs
       targetBalance = calculateNetBalance(targetLedger, 'user');
     } else if (globalLoveBalanceState.loveBalance > 0) {
       targetBalance = globalLoveBalanceState.loveBalance;
-    } else if (cleanEmail === 'dora@gmail.com') {
-      targetBalance = 25.0; // preserve initial seed for dora@gmail.com
     } else {
       targetBalance = 0;
     }
@@ -671,28 +673,21 @@ async function switchActiveDora(cleanEmail, isDora = true, adminEmail = 'arthurs
         await UserModel.findOneAndUpdate({ email: cleanEmail }, { $set: { isDora: false } });
       } catch (err) {}
     }
-    // Fallback active Dora to dora@gmail.com
-    globalLoveBalanceState.activeDoraEmail = 'dora@gmail.com';
-    const doraAccount = memoryUsers.get('dora@gmail.com');
-    if (doraAccount) {
-      doraAccount.isDora = true;
-      globalLoveBalanceState.loveBalance = typeof doraAccount.loveBalance === 'number' ? doraAccount.loveBalance : 25;
-      const doraLedger = Array.isArray(doraAccount.loveLedger) ? doraAccount.loveLedger : [];
-      const adminEntries = (globalLoveBalanceState.loveLedger || []).filter(e => e && (e.target === 'admin' || (e.description && e.description.includes('[Darsh]'))));
-      globalLoveBalanceState.loveLedger = sanitizeLedger([...doraLedger, ...adminEntries]);
-      persistLoveState();
-    }
+    // Clear active Dora state
+    globalLoveBalanceState.activeDoraEmail = '';
+    globalLoveBalanceState.loveBalance = 0;
+    persistLoveState();
   }
 
   // 3. Real-time broadcasts to both Admin & Dora screens
-  const activeName = user.firstName || user.name || cleanEmail.split('@')[0];
+  const activeName = Boolean(isDora) ? (user.firstName || user.name || cleanEmail.split('@')[0]) : 'Dora';
   const payload = {
     email: cleanEmail,
     isDora: Boolean(isDora),
     name: user.name,
     firstName: activeName,
     activeDoraName: activeName,
-    activeDoraEmail: Boolean(isDora) ? cleanEmail : 'dora@gmail.com',
+    activeDoraEmail: Boolean(isDora) ? cleanEmail : (globalLoveBalanceState.activeDoraEmail || ''),
     loveBalance: globalLoveBalanceState.loveBalance,
     adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
     currentLoveBalance: globalLoveBalanceState.loveBalance,
@@ -719,7 +714,8 @@ async function switchActiveDora(cleanEmail, isDora = true, adminEmail = 'arthurs
 }
 
 function syncActiveDoraUserBalance() {
-  const activeEmail = (globalLoveBalanceState.activeDoraEmail || 'dora@gmail.com').toLowerCase().trim();
+  const activeEmail = (globalLoveBalanceState.activeDoraEmail || '').toLowerCase().trim();
+  if (!activeEmail || activeEmail === 'dora@gmail.com') return;
   let doraUser = memoryUsers.get(activeEmail);
   if (!doraUser) {
     doraUser = {
@@ -728,6 +724,22 @@ function syncActiveDoraUserBalance() {
       firstName: activeEmail.split('@')[0],
       role: 'user',
       isAdmin: false,
+      isDora: true,
+      loveBalance: globalLoveBalanceState.loveBalance,
+      loveLedger: []
+    };
+    memoryUsers.set(activeEmail, doraUser);
+  }
+  const userLedger = (globalLoveBalanceState.loveLedger || []).filter(e => e && e.target !== 'admin' && !(e.description && e.description.includes('[Darsh]')));
+  doraUser.loveBalance = globalLoveBalanceState.loveBalance;
+  doraUser.loveLedger = userLedger;
+  if (mongoose.connection.readyState === 1) {
+    UserModel.findOneAndUpdate(
+      { email: activeEmail },
+      { $set: { loveBalance: globalLoveBalanceState.loveBalance, loveLedger: userLedger } },
+      { upsert: true }
+    ).catch(() => {});
+  }
       isDora: true,
       loveBalance: globalLoveBalanceState.loveBalance,
       loveLedger: []
@@ -764,7 +776,7 @@ app.post('/api/user/sync-state', async (req, res) => {
         fullName: cleanEmail,
         role: cleanEmail === 'arthurs10pc@gmail.com' ? 'parent' : 'user',
         isAdmin: cleanEmail === 'arthurs10pc@gmail.com',
-        isDora: cleanEmail === 'dora@gmail.com',
+        isDora: false,
         loveBalance: isNaN(numBalance) ? 0 : numBalance,
         loveLedger: Array.isArray(loveLedger) ? sanitizeLedger(loveLedger) : [],
         lastLogin: new Date()
@@ -863,13 +875,20 @@ app.post('/api/admin/delete-user', async (req, res) => {
     // 2. Permanently delete from MongoDB
     if (mongoose.connection.readyState === 1) {
       try {
-        await UserModel.deleteOne({ email: cleanEmail });
+        await UserModel.deleteMany({ email: cleanEmail });
       } catch (err) {
         console.warn('Mongo delete user error:', err.message);
       }
     }
 
-    // 3. Broadcast updated directory
+    // 3. Reset active Dora if this deleted account was the active Dora
+    if (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === cleanEmail) {
+      globalLoveBalanceState.activeDoraEmail = '';
+      globalLoveBalanceState.loveBalance = 0;
+      persistLoveState();
+    }
+
+    // 4. Broadcast updated directory
     await broadcastUsersDirectory();
     io.emit('user_permanently_deleted', { email: cleanEmail, timestamp: Date.now() });
 
@@ -953,14 +972,18 @@ const activeRoomUsers = new Map(); // socket.id -> { room, role, email, name, pi
 async function getUsersDirectoryData() {
   const map = new Map();
   // 1. Load memory users
-  memoryUsers.forEach((u, k) => map.set(k.toLowerCase(), { ...u }));
+  memoryUsers.forEach((u, k) => {
+    if (k && k.toLowerCase() !== 'dora@gmail.com') {
+      map.set(k.toLowerCase(), { ...u });
+    }
+  });
 
   // 2. Load Mongo users if connected
   if (mongoose.connection.readyState === 1) {
     try {
-      const dbUsers = await UserModel.find({}).lean();
+      const dbUsers = await UserModel.find({ email: { $ne: 'dora@gmail.com' } }).lean();
       dbUsers.forEach(u => {
-        if (u && u.email) {
+        if (u && u.email && u.email.toLowerCase() !== 'dora@gmail.com') {
           const k = u.email.toLowerCase();
           map.set(k, { ...map.get(k), ...u, email: k });
         }
@@ -968,9 +991,14 @@ async function getUsersDirectoryData() {
     } catch (e) {}
   }
 
+  // Demo account 'dora@gmail.com' must never be listed
+  map.delete('dora@gmail.com');
+
   // 3. Compute live presence
   const now = Date.now();
-  const list = Array.from(map.values()).map(u => {
+  const list = Array.from(map.values())
+    .filter(u => u && u.email && u.email.toLowerCase() !== 'dora@gmail.com')
+    .map(u => {
     let isOnline = false;
     let connectedCount = 0;
     for (const [sId, info] of activeRoomUsers.entries()) {
@@ -1303,7 +1331,7 @@ setInterval(() => {
   memoryDailySlots = broadcastSlots;
 
   io.emit('love_balance_heartbeat_sync', {
-    activeDoraEmail: globalLoveBalanceState.activeDoraEmail || 'dora@gmail.com',
+    activeDoraEmail: (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail !== 'dora@gmail.com') ? globalLoveBalanceState.activeDoraEmail : '',
     loveBalance: globalLoveBalanceState.loveBalance,
     adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
     currentLoveBalance: globalLoveBalanceState.loveBalance,
@@ -1487,7 +1515,7 @@ io.on('connection', (socket) => {
         fullName: cleanEmail,
         role: cleanEmail === 'arthurs10pc@gmail.com' ? 'parent' : 'user',
         isAdmin: cleanEmail === 'arthurs10pc@gmail.com',
-        isDora: cleanEmail === 'dora@gmail.com',
+        isDora: false,
         loveBalance: isNaN(numBalance) ? 0 : numBalance,
         loveLedger: Array.isArray(data.loveLedger) ? sanitizeLedger(data.loveLedger) : [],
         lastLogin: new Date()
@@ -2401,8 +2429,14 @@ io.on('connection', (socket) => {
 
     if (mongoose.connection.readyState === 1) {
       try {
-        await UserModel.deleteOne({ email: cleanEmail });
+        await UserModel.deleteMany({ email: cleanEmail });
       } catch (err) {}
+    }
+
+    if (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === cleanEmail) {
+      globalLoveBalanceState.activeDoraEmail = '';
+      globalLoveBalanceState.loveBalance = 0;
+      persistLoveState();
     }
 
     broadcastUsersDirectory();
