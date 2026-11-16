@@ -369,9 +369,14 @@ app.get('/api/yt-search', async (req, res) => {
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   name: { type: String, default: '' },
+  firstName: { type: String, default: '' },
+  fullName: { type: String, default: '' },
   originalName: { type: String, default: '' },
   role: { type: String, default: 'user' },
   picture: { type: String, default: '' },
+  isDora: { type: Boolean, default: false },
+  doraAssignedAt: { type: Date },
+  assignedBy: { type: String, default: '' },
   lastLogin: { type: Date, default: Date.now }
 });
 
@@ -382,18 +387,24 @@ const memoryUsers = new Map();
 memoryUsers.set('arthurs10pc@gmail.com', {
   email: 'arthurs10pc@gmail.com',
   name: 'Darsh',
+  firstName: 'Darsh',
+  fullName: 'Darsh (Admin)',
   originalName: 'Darsh (Admin)',
   role: 'parent',
   isAdmin: true,
+  isDora: false,
   picture: 'https://lh3.googleusercontent.com/a/default-user',
   lastLogin: new Date()
 });
 memoryUsers.set('dora@gmail.com', {
   email: 'dora@gmail.com',
   name: 'Dora',
+  firstName: 'Dora',
+  fullName: 'Dora (User)',
   originalName: 'Dora (User)',
   role: 'user',
   isAdmin: false,
+  isDora: true,
   picture: '',
   lastLogin: new Date()
 });
@@ -405,15 +416,29 @@ app.post('/api/auth/google-login', async (req, res) => {
     const cleanEmail = email.toLowerCase().trim();
     const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
     const role = isAdmin ? 'parent' : 'user';
-    const displayName = isAdmin ? 'Darsh' : 'Dora';
+    const fullName = name || (isAdmin ? 'Darsh' : 'User');
+    const firstName = fullName.trim().split(' ')[0] || fullName;
+    const displayName = isAdmin ? 'Darsh' : firstName;
+
+    // Check if user already exists to preserve isDora status
+    let existing = memoryUsers.get(cleanEmail);
+    if (!existing && mongoose.connection.readyState === 1) {
+      try {
+        existing = await UserModel.findOne({ email: cleanEmail }).lean();
+      } catch (err) {}
+    }
+    const isDora = existing ? Boolean(existing.isDora) : (cleanEmail === 'dora@gmail.com');
 
     const userObj = {
       email: cleanEmail,
       name: displayName,
-      originalName: name || displayName,
+      firstName,
+      fullName,
+      originalName: name || fullName,
       role,
       picture: picture || '',
       isAdmin,
+      isDora,
       lastLogin: new Date()
     };
 
@@ -443,14 +468,69 @@ app.get('/api/auth/current-user', (req, res) => {
   const email = (req.query.email || '').toLowerCase().trim();
   if (!email) return res.json({ user: null });
   const isAdmin = email === 'arthurs10pc@gmail.com';
+  const existing = memoryUsers.get(email);
   return res.json({
     user: {
       email,
       role: isAdmin ? 'parent' : 'user',
-      name: isAdmin ? 'Darsh' : 'Dora',
-      isAdmin
+      name: isAdmin ? 'Darsh' : (existing?.name || 'User'),
+      firstName: isAdmin ? 'Darsh' : (existing?.firstName || 'User'),
+      isAdmin,
+      isDora: isAdmin ? false : Boolean(existing?.isDora || email === 'dora@gmail.com')
     }
   });
+});
+
+app.post('/api/admin/set-dora', async (req, res) => {
+  try {
+    const { email, isDora, adminEmail } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    const cleanEmail = email.toLowerCase().trim();
+    if (cleanEmail === 'arthurs10pc@gmail.com') {
+      return res.status(400).json({ error: 'Admin cannot be set as Dora' });
+    }
+
+    let user = memoryUsers.get(cleanEmail);
+    if (!user) {
+      user = {
+        email: cleanEmail,
+        name: 'Dora',
+        firstName: 'Dora',
+        fullName: 'Dora User',
+        role: 'user',
+        isAdmin: false,
+        picture: '',
+        lastLogin: new Date()
+      };
+    }
+    user.isDora = Boolean(isDora);
+    user.doraAssignedAt = new Date();
+    user.assignedBy = adminEmail || 'arthurs10pc@gmail.com';
+    memoryUsers.set(cleanEmail, user);
+
+    if (mongoose.connection.readyState === 1) {
+      await UserModel.findOneAndUpdate(
+        { email: cleanEmail },
+        {
+          isDora: Boolean(isDora),
+          doraAssignedAt: new Date(),
+          assignedBy: adminEmail || 'arthurs10pc@gmail.com'
+        },
+        { upsert: true, new: true }
+      );
+    }
+
+    broadcastUsersDirectory();
+    io.emit('dora_status_update', {
+      email: cleanEmail,
+      isDora: Boolean(isDora),
+      timestamp: Date.now()
+    });
+
+    return res.json({ success: true, email: cleanEmail, isDora: Boolean(isDora) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/auth/users-directory', async (req, res) => {
@@ -499,12 +579,17 @@ async function getUsersDirectoryData() {
         }
       }
     }
+    const isAdmin = u.email.toLowerCase() === 'arthurs10pc@gmail.com';
+    const isDora = isAdmin ? false : Boolean(u.isDora || u.email.toLowerCase() === 'dora@gmail.com');
     return {
       email: u.email,
-      name: u.name || (u.isAdmin ? 'Darsh' : 'Dora'),
+      name: u.name || (isAdmin ? 'Darsh' : (u.firstName || 'User')),
+      firstName: u.firstName || (isAdmin ? 'Darsh' : 'User'),
+      fullName: u.fullName || u.originalName || u.name || '',
       originalName: u.originalName || u.name || '',
-      role: u.role || (u.email === 'arthurs10pc@gmail.com' ? 'parent' : 'user'),
-      isAdmin: u.email === 'arthurs10pc@gmail.com',
+      role: isAdmin ? 'parent' : 'user',
+      isAdmin,
+      isDora,
       picture: u.picture || '',
       isOnline,
       connectedSessions: connectedCount,
@@ -512,10 +597,11 @@ async function getUsersDirectoryData() {
     };
   });
 
-  // Sort: online first, then Admin, then latest login
+  // Sort: online first, then Admin, then Dora, then latest login
   list.sort((a, b) => {
     if (a.isOnline !== b.isOnline) return b.isOnline ? 1 : -1;
     if (a.isAdmin !== b.isAdmin) return b.isAdmin ? 1 : -1;
+    if (a.isDora !== b.isDora) return b.isDora ? 1 : -1;
     return new Date(b.lastLogin).getTime() - new Date(a.lastLogin).getTime();
   });
 
@@ -1761,6 +1847,43 @@ io.on('connection', (socket) => {
       const data = await getUsersDirectoryData();
       socket.emit('users_directory_update', data);
     } catch (e) {}
+  });
+
+  socket.on('admin_set_dora', async ({ email, isDora }) => {
+    if (!email) return;
+    const cleanEmail = email.toLowerCase().trim();
+    if (cleanEmail === 'arthurs10pc@gmail.com') return;
+
+    let user = memoryUsers.get(cleanEmail);
+    if (!user) {
+      user = {
+        email: cleanEmail,
+        name: 'Dora',
+        firstName: 'Dora',
+        fullName: 'Dora User',
+        role: 'user',
+        isAdmin: false,
+        picture: '',
+        lastLogin: new Date()
+      };
+    }
+    user.isDora = Boolean(isDora);
+    memoryUsers.set(cleanEmail, user);
+
+    if (mongoose.connection.readyState === 1) {
+      await UserModel.findOneAndUpdate(
+        { email: cleanEmail },
+        { isDora: Boolean(isDora), doraAssignedAt: new Date() },
+        { upsert: true }
+      ).catch(() => {});
+    }
+
+    broadcastUsersDirectory();
+    io.emit('dora_status_update', {
+      email: cleanEmail,
+      isDora: Boolean(isDora),
+      timestamp: Date.now()
+    });
   });
 
   socket.on('disconnect', () => {
