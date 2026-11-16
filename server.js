@@ -533,6 +533,42 @@ app.post('/api/admin/set-dora', async (req, res) => {
   }
 });
 
+app.post('/api/admin/delete-user', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    const cleanEmail = email.toLowerCase().trim();
+    if (cleanEmail === 'arthurs10pc@gmail.com') {
+      return res.status(400).json({ error: 'Cannot delete primary Admin account' });
+    }
+
+    // 1. Remove from in-memory maps
+    memoryUsers.delete(cleanEmail);
+    for (const [sId, info] of activeRoomUsers.entries()) {
+      if (info.email && info.email.toLowerCase() === cleanEmail) {
+        activeRoomUsers.delete(sId);
+      }
+    }
+
+    // 2. Permanently delete from MongoDB
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await UserModel.deleteOne({ email: cleanEmail });
+      } catch (err) {
+        console.warn('Mongo delete user error:', err.message);
+      }
+    }
+
+    // 3. Broadcast updated directory
+    await broadcastUsersDirectory();
+    io.emit('user_permanently_deleted', { email: cleanEmail, timestamp: Date.now() });
+
+    return res.json({ success: true, deletedEmail: cleanEmail });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/auth/users-directory', async (req, res) => {
   try {
     const directory = await getUsersDirectoryData();
@@ -1884,6 +1920,28 @@ io.on('connection', (socket) => {
       isDora: Boolean(isDora),
       timestamp: Date.now()
     });
+  });
+
+  socket.on('admin_delete_user', async ({ email }) => {
+    if (!email) return;
+    const cleanEmail = email.toLowerCase().trim();
+    if (cleanEmail === 'arthurs10pc@gmail.com') return;
+
+    memoryUsers.delete(cleanEmail);
+    for (const [sId, info] of activeRoomUsers.entries()) {
+      if (info.email && info.email.toLowerCase() === cleanEmail) {
+        activeRoomUsers.delete(sId);
+      }
+    }
+
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await UserModel.deleteOne({ email: cleanEmail });
+      } catch (err) {}
+    }
+
+    broadcastUsersDirectory();
+    io.emit('user_permanently_deleted', { email: cleanEmail, timestamp: Date.now() });
   });
 
   socket.on('disconnect', () => {
