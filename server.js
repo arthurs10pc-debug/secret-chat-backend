@@ -287,24 +287,33 @@ let memoryDailySubmissions = [];
 
 async function seedDefaultSlotsIfEmpty() {
   try {
-    const deleted = globalLoveBalanceState.deletedSlotIds || [];
-    const validDefaults = DEFAULT_DAILY_SLOTS.filter(s => !deleted.includes(s.id));
+    // 9 Core default slots must NEVER be deleted
+    globalLoveBalanceState.deletedSlotIds = (globalLoveBalanceState.deletedSlotIds || [])
+      .filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
+    persistLoveState();
 
     if (mongoose.connection.readyState === 1) {
-      const count = await DailyTaskSlot.countDocuments();
-      if (count === 0 && validDefaults.length > 0) {
-        await DailyTaskSlot.insertMany(validDefaults);
-        console.log('Seeded default daily task slots into MongoDB.');
+      for (const slot of DEFAULT_DAILY_SLOTS) {
+        await DailyTaskSlot.findOneAndUpdate(
+          { id: slot.id },
+          slot,
+          { upsert: true, new: true }
+        ).catch(() => {});
       }
-      if (deleted.length > 0) {
-        await DailyTaskSlot.deleteMany({ id: { $in: deleted } }).catch(() => {});
-      }
+      console.log('Ensured all 9 default daily task slots exist in MongoDB.');
     }
-    if (Array.isArray(globalLoveBalanceState.dailySlots) && globalLoveBalanceState.dailySlots.length > 0) {
-      memoryDailySlots = globalLoveBalanceState.dailySlots.filter(s => s && !deleted.includes(s.id));
-    } else {
-      memoryDailySlots = validDefaults;
+
+    const map = new Map();
+    DEFAULT_DAILY_SLOTS.forEach(d => map.set(d.id, d));
+    (memoryDailySlots || []).forEach(s => { if (s && s.id) map.set(s.id, s); });
+    if (Array.isArray(globalLoveBalanceState.dailySlots)) {
+      globalLoveBalanceState.dailySlots.forEach(s => { if (s && s.id) map.set(s.id, s); });
     }
+    const cleanDeleted = (globalLoveBalanceState.deletedSlotIds || []).filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
+    memoryDailySlots = Array.from(map.values())
+      .filter(s => s && !cleanDeleted.includes(s.id))
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+    globalLoveBalanceState.dailySlots = memoryDailySlots;
   } catch (err) {
     console.warn('Error seeding default daily slots:', err);
   }
@@ -584,6 +593,30 @@ app.get('/api/auth/users-directory', async (req, res) => {
   try {
     const directory = await getUsersDirectoryData();
     return res.json({ success: true, ...directory });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/daily-tasks/sync', async (req, res) => {
+  try {
+    const activeDeleted = (globalLoveBalanceState.deletedSlotIds || []).filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
+    const mapSlots = new Map();
+    DEFAULT_DAILY_SLOTS.forEach(d => mapSlots.set(d.id, d));
+    (memoryDailySlots || []).forEach(s => { if (s && s.id) mapSlots.set(s.id, s); });
+    const slots = Array.from(mapSlots.values()).filter(s => s && !activeDeleted.includes(s.id)).sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    let submissions = memoryDailySubmissions;
+    if (mongoose.connection.readyState === 1) {
+      const past30Days = new Date(Date.now() - 30 * 86400000);
+      submissions = await DailyTaskSubmission.find({ createdAt: { $gte: past30Days } }).lean();
+    }
+    return res.json({
+      success: true,
+      slots,
+      submissions,
+      deletedSlotIds: activeDeleted
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -929,11 +962,18 @@ setTimeout(evaluateRoutineAndHabitInfractions, 3000);
 
 // High-frequency 4-second authoritative sync heartbeat broadcast across all devices
 setInterval(() => {
-  const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
+  const activeDeleted = (globalLoveBalanceState.deletedSlotIds || []).filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
   // Ensure ledger is clean and mathematical totals reflect reality
   globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
   globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
   globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+
+  const mapSlots = new Map();
+  DEFAULT_DAILY_SLOTS.forEach(d => mapSlots.set(d.id, d));
+  (memoryDailySlots || []).forEach(s => { if (s && s.id) mapSlots.set(s.id, s); });
+  const broadcastSlots = Array.from(mapSlots.values()).filter(s => s && !activeDeleted.includes(s.id)).sort((a, b) => (a.order || 0) - (b.order || 0));
+  memoryDailySlots = broadcastSlots;
+
   io.emit('love_balance_heartbeat_sync', {
     loveBalance: globalLoveBalanceState.loveBalance,
     adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
@@ -942,7 +982,7 @@ setInterval(() => {
     loveLedger: globalLoveBalanceState.loveLedger,
     wishRequests: globalLoveBalanceState.wishRequests,
     dailySubmissions: memoryDailySubmissions,
-    dailySlots: (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id)),
+    dailySlots: broadcastSlots,
     deletedSlotIds: activeDeleted,
     deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
     lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
@@ -991,8 +1031,13 @@ io.on('connection', (socket) => {
     }
 
     // Sync Love Balance real-time state to newly connected client
-    const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
-    const activeSlots = (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id));
+    const activeDeleted = (globalLoveBalanceState.deletedSlotIds || []).filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
+    const mapSlots = new Map();
+    DEFAULT_DAILY_SLOTS.forEach(d => mapSlots.set(d.id, d));
+    (memoryDailySlots || []).forEach(s => { if (s && s.id) mapSlots.set(s.id, s); });
+    const activeSlots = Array.from(mapSlots.values()).filter(s => s && !activeDeleted.includes(s.id)).sort((a, b) => (a.order || 0) - (b.order || 0));
+    memoryDailySlots = activeSlots;
+
     socket.emit('love_balance_broadcast', {
       action: 'SYNC_STATE_RESPONSE',
       loveBalance: globalLoveBalanceState.loveBalance,
@@ -1007,25 +1052,14 @@ io.on('connection', (socket) => {
 
     try {
       const todayStr = new Date().toISOString().split('T')[0];
-      let initialSlots = [];
-      let initialSubmissions = [];
+      let initialSubmissions = memoryDailySubmissions;
       if (mongoose.connection.readyState === 1) {
-        initialSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1 }).lean();
-        if (initialSlots.length === 0) {
-          const validDefaults = DEFAULT_DAILY_SLOTS.filter(s => !activeDeleted.includes(s.id));
-          if (validDefaults.length > 0) {
-            await DailyTaskSlot.insertMany(validDefaults);
-            initialSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1 }).lean();
-          }
-        }
-        initialSubmissions = await DailyTaskSubmission.find({ date: todayStr }).lean();
-      } else {
-        initialSlots = activeSlots;
-        initialSubmissions = memoryDailySubmissions.filter(s => s.date === todayStr);
+        const past30Days = new Date(Date.now() - 30 * 86400000);
+        initialSubmissions = await DailyTaskSubmission.find({ createdAt: { $gte: past30Days } }).lean();
       }
       socket.emit('daily_task_sync_response', {
         date: todayStr,
-        slots: initialSlots,
+        slots: activeSlots,
         submissions: initialSubmissions,
         deletedSlotIds: activeDeleted
       });
@@ -1679,11 +1713,15 @@ io.on('connection', (socket) => {
   socket.on('daily_slot_delete', async ({ slotId, deletedSlotIds }) => {
     try {
       if (!slotId) return;
+      if (DEFAULT_DAILY_SLOTS.some(d => d.id === slotId)) {
+        console.log(`Protected core routine slot "${slotId}" cannot be deleted.`);
+        return;
+      }
       const allDeleted = Array.from(new Set([
         ...(globalLoveBalanceState.deletedSlotIds || []),
         slotId,
         ...(Array.isArray(deletedSlotIds) ? deletedSlotIds : [])
-      ]));
+      ])).filter(id => !DEFAULT_DAILY_SLOTS.some(d => d.id === id));
       globalLoveBalanceState.deletedSlotIds = allDeleted;
       memoryDailySlots = memoryDailySlots.filter(s => !allDeleted.includes(s.id));
       globalLoveBalanceState.dailySlots = memoryDailySlots;
