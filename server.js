@@ -377,6 +377,27 @@ const userSchema = new mongoose.Schema({
 
 const UserModel = mongoose.model('User', userSchema);
 
+// Memory fallback directory for instant reactivity across all devices
+const memoryUsers = new Map();
+memoryUsers.set('arthurs10pc@gmail.com', {
+  email: 'arthurs10pc@gmail.com',
+  name: 'Darsh',
+  originalName: 'Darsh (Admin)',
+  role: 'parent',
+  isAdmin: true,
+  picture: 'https://lh3.googleusercontent.com/a/default-user',
+  lastLogin: new Date()
+});
+memoryUsers.set('dora@gmail.com', {
+  email: 'dora@gmail.com',
+  name: 'Dora',
+  originalName: 'Dora (User)',
+  role: 'user',
+  isAdmin: false,
+  picture: '',
+  lastLogin: new Date()
+});
+
 app.post('/api/auth/google-login', async (req, res) => {
   try {
     const { email, name, picture } = req.body || {};
@@ -389,12 +410,14 @@ app.post('/api/auth/google-login', async (req, res) => {
     const userObj = {
       email: cleanEmail,
       name: displayName,
-      originalName: name || '',
+      originalName: name || displayName,
       role,
       picture: picture || '',
       isAdmin,
       lastLogin: new Date()
     };
+
+    memoryUsers.set(cleanEmail, userObj);
 
     if (mongoose.connection.readyState === 1) {
       try {
@@ -408,6 +431,7 @@ app.post('/api/auth/google-login', async (req, res) => {
       }
     }
 
+    broadcastUsersDirectory();
     return res.json({ success: true, user: userObj });
   } catch (e) {
     console.error('Google login error:', e);
@@ -429,20 +453,102 @@ app.get('/api/auth/current-user', (req, res) => {
   });
 });
 
+app.get('/api/auth/users-directory', async (req, res) => {
+  try {
+    const directory = await getUsersDirectoryData();
+    return res.json({ success: true, ...directory });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // --- REAL-TIME USER PRESENCE TRACKING ---
-const activeRoomUsers = new Map(); // socket.id -> { room, role, isForeground: true, lastHeartbeat: timestamp }
+const activeRoomUsers = new Map(); // socket.id -> { room, role, email, name, picture, isForeground: true, lastHeartbeat: timestamp }
+
+async function getUsersDirectoryData() {
+  const map = new Map();
+  // 1. Load memory users
+  memoryUsers.forEach((u, k) => map.set(k.toLowerCase(), { ...u }));
+
+  // 2. Load Mongo users if connected
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const dbUsers = await UserModel.find({}).lean();
+      dbUsers.forEach(u => {
+        if (u && u.email) {
+          const k = u.email.toLowerCase();
+          map.set(k, { ...map.get(k), ...u, email: k });
+        }
+      });
+    } catch (e) {}
+  }
+
+  // 3. Compute live presence
+  const now = Date.now();
+  const list = Array.from(map.values()).map(u => {
+    let isOnline = false;
+    let connectedCount = 0;
+    for (const [sId, info] of activeRoomUsers.entries()) {
+      if ((now - (info.lastHeartbeat || now)) < 30000) {
+        if (info.email && info.email.toLowerCase() === u.email.toLowerCase()) {
+          isOnline = true;
+          connectedCount++;
+        } else if (!info.email && info.role === u.role) {
+          isOnline = true;
+          connectedCount++;
+        }
+      }
+    }
+    return {
+      email: u.email,
+      name: u.name || (u.isAdmin ? 'Darsh' : 'Dora'),
+      originalName: u.originalName || u.name || '',
+      role: u.role || (u.email === 'arthurs10pc@gmail.com' ? 'parent' : 'user'),
+      isAdmin: u.email === 'arthurs10pc@gmail.com',
+      picture: u.picture || '',
+      isOnline,
+      connectedSessions: connectedCount,
+      lastLogin: u.lastLogin || new Date()
+    };
+  });
+
+  // Sort: online first, then Admin, then latest login
+  list.sort((a, b) => {
+    if (a.isOnline !== b.isOnline) return b.isOnline ? 1 : -1;
+    if (a.isAdmin !== b.isAdmin) return b.isAdmin ? 1 : -1;
+    return new Date(b.lastLogin).getTime() - new Date(a.lastLogin).getTime();
+  });
+
+  return {
+    totalCount: list.length,
+    onlineCount: list.filter(u => u.isOnline).length,
+    users: list
+  };
+}
+
+async function broadcastUsersDirectory() {
+  try {
+    const data = await getUsersDirectoryData();
+    io.emit('users_directory_update', data);
+  } catch (e) {
+    console.warn("broadcastUsersDirectory error:", e.message);
+  }
+}
 
 function broadcastPresence(room) {
   const targetRoom = room || 'stealth_master_room';
   const onlineRoles = new Set();
+  const onlineEmails = new Set();
   const now = Date.now();
   for (const [sId, info] of activeRoomUsers.entries()) {
     if (info.isForeground !== false && (now - (info.lastHeartbeat || now)) < 25000) {
       if (info.role) onlineRoles.add(info.role);
+      if (info.email) onlineEmails.add(info.email);
     }
   }
   const payload = {
     onlineRoles: Array.from(onlineRoles),
+    onlineEmails: Array.from(onlineEmails),
     timestamp: now
   };
   io.to(targetRoom).emit('presence_status', payload);
@@ -1617,11 +1723,52 @@ io.on('connection', (socket) => {
     broadcastPresence(targetRoom);
   });
 
+  socket.on('auth_identify', (profile) => {
+    if (profile && profile.email) {
+      const cleanEmail = profile.email.toLowerCase().trim();
+      socket.email = cleanEmail;
+      socket.userName = profile.name || (cleanEmail === 'arthurs10pc@gmail.com' ? 'Darsh' : 'Dora');
+      socket.picture = profile.picture || '';
+      socket.role = cleanEmail === 'arthurs10pc@gmail.com' ? 'parent' : 'user';
+
+      activeRoomUsers.set(socket.id, {
+        room: socket.roomName || 'stealth_master_room',
+        role: socket.role,
+        email: cleanEmail,
+        name: socket.userName,
+        picture: socket.picture,
+        isForeground: true,
+        lastHeartbeat: Date.now()
+      });
+
+      memoryUsers.set(cleanEmail, {
+        email: cleanEmail,
+        name: socket.userName,
+        originalName: profile.originalName || profile.name || socket.userName,
+        role: socket.role,
+        isAdmin: socket.role === 'parent',
+        picture: socket.picture,
+        lastLogin: new Date()
+      });
+
+      broadcastPresence(socket.roomName);
+      broadcastUsersDirectory();
+    }
+  });
+
+  socket.on('request_users_directory', async () => {
+    try {
+      const data = await getUsersDirectoryData();
+      socket.emit('users_directory_update', data);
+    } catch (e) {}
+  });
+
   socket.on('disconnect', () => {
     activeRoomUsers.delete(socket.id);
     if (socket.roomName) {
       broadcastPresence(socket.roomName);
     }
+    broadcastUsersDirectory();
     io.emit('peer_typing_status', { isTyping: false });
   });
 });
