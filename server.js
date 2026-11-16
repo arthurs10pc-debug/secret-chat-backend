@@ -503,6 +503,17 @@ app.post('/api/admin/set-dora', async (req, res) => {
         lastLogin: new Date()
       };
     }
+    if (Boolean(isDora)) {
+      memoryUsers.forEach((u, k) => {
+        if (k !== cleanEmail) u.isDora = false;
+      });
+      if (mongoose.connection.readyState === 1) {
+        try {
+          await UserModel.updateMany({ email: { $ne: cleanEmail } }, { isDora: false });
+        } catch (err) {}
+      }
+    }
+
     user.isDora = Boolean(isDora);
     user.doraAssignedAt = new Date();
     user.assignedBy = adminEmail || 'arthurs10pc@gmail.com';
@@ -1903,6 +1914,17 @@ io.on('connection', (socket) => {
         lastLogin: new Date()
       };
     }
+    if (Boolean(isDora)) {
+      memoryUsers.forEach((u, k) => {
+        if (k !== cleanEmail) u.isDora = false;
+      });
+      if (mongoose.connection.readyState === 1) {
+        try {
+          await UserModel.updateMany({ email: { $ne: cleanEmail } }, { isDora: false });
+        } catch (err) {}
+      }
+    }
+
     user.isDora = Boolean(isDora);
     memoryUsers.set(cleanEmail, user);
 
