@@ -2454,90 +2454,94 @@ io.on('connection', (socket) => {
       console.error("Error saving message:", err);
     }
 
-    // --- REAL-TIME SERVER-SIDE MESSAGE KARMA EVALUATION FOR DORA ---
-    // Rule: When Dora (role === 'user' or 'A') sends an instant reply to Darsh within 5 minutes, award Dora +1.00 Point
-    if (role === 'user' || role === 'A') {
-      try {
-        const priorAdminMsgs = memoryMessages.filter(m => 
-          m && m.room === room && 
-          m._id !== newMsgData._id &&
-          (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H') &&
-          m.timestamp
-        );
-        const lastAdminMsg = priorAdminMsgs.length > 0 ? priorAdminMsgs[priorAdminMsgs.length - 1] : null;
+    // --- REAL-TIME SERVER-SIDE MESSAGE KARMA EVALUATION (2-WAY FOR BOTH DORA & DARSH) ---
+    // Rule: When either Dora or Darsh sends an instant reply to counterpart within 5 minutes, award +1.00 Point
+    try {
+      const isSenderDora = (role === 'user' || role === 'A');
+      const targetUser = isSenderDora ? 'user' : 'admin';
+      const targetLabel = isSenderDora ? 'Dora' : 'Darsh';
 
-        if (lastAdminMsg && lastAdminMsg.timestamp) {
-          const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastAdminMsg.timestamp).getTime());
-          if (diffMs <= 5 * 60 * 1000) {
-            // Check 5-minute cooldown to prevent spam
-            const existingInstant = (globalLoveBalanceState.loveLedger || []).find(e => 
-              e && e.target === 'user' && e.type === 'credit' && (e.description || '').includes('Instant Reply')
-            );
-            const lastInstantTime = existingInstant ? new Date(existingInstant.earnedAt || 0).getTime() : 0;
-            const cooldownPassed = !existingInstant || isNaN(lastInstantTime) || (Date.now() - lastInstantTime >= 4 * 60 * 1000);
+      const priorMsgs = memoryMessages.filter(m => 
+        m && m.room === room && 
+        m._id !== newMsgData._id &&
+        (isSenderDora 
+          ? (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H')
+          : (m.senderRole === 'user' || m.senderRole === 'A')) &&
+        m.timestamp
+      );
+      const lastCounterpartMsg = priorMsgs.length > 0 ? priorMsgs[priorMsgs.length - 1] : null;
 
-            if (cooldownPassed) {
-              const replyTxId = `lb_instant_${Date.now()}_user`;
-              const nowStr = new Date().toLocaleString('en-GB');
-              const expDate = new Date();
-              expDate.setMonth(expDate.getMonth() + 1);
-              const expStr = expDate.toLocaleDateString('en-GB');
+      if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
+        const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
+        if (diffMs <= 5 * 60 * 1000) {
+          // Check 5-minute cooldown per target user to prevent spam
+          const existingInstant = (globalLoveBalanceState.loveLedger || []).find(e => 
+            e && e.target === targetUser && e.type === 'credit' && (e.description || '').includes('Instant Reply')
+          );
+          const lastInstantTime = existingInstant ? new Date(existingInstant.earnedAt || 0).getTime() : 0;
+          const cooldownPassed = !existingInstant || isNaN(lastInstantTime) || (Date.now() - lastInstantTime >= 4 * 60 * 1000);
 
-              const replyEntry = {
-                id: replyTxId,
-                sl: 1,
-                target: 'user',
-                description: '[Dora] Instant Reply (Within 5 Mins)',
-                earnedAt: nowStr,
-                expireDate: expStr,
-                points: 1.00,
+          if (cooldownPassed) {
+            const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
+            const nowStr = new Date().toLocaleString('en-GB');
+            const expDate = new Date();
+            expDate.setMonth(expDate.getMonth() + 1);
+            const expStr = expDate.toLocaleDateString('en-GB');
+
+            const replyEntry = {
+              id: replyTxId,
+              sl: 1,
+              target: targetUser,
+              description: `[${targetLabel}] Instant Reply (Within 5 Mins)`,
+              earnedAt: nowStr,
+              expireDate: expStr,
+              points: 1.00,
+              type: 'credit',
+              remarks: 'Instant Reply (Within 5 Mins)',
+              status: 'Confirmed'
+            };
+
+            const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+            if (!delTxs.includes(replyTxId)) {
+              globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
+              syncBalancesFromLedger();
+              persistLoveState();
+              syncActiveDoraUserBalance();
+
+              io.emit('love_balance_broadcast', {
+                action: 'TRANSACTION',
+                target: targetUser,
+                amount: 1.00,
                 type: 'credit',
-                remarks: 'Instant Reply (Within 5 Mins)',
-                status: 'Confirmed'
-              };
+                reason: 'Instant Reply (Within 5 Mins)',
+                newEntry: replyEntry,
+                loveLedger: globalLoveBalanceState.loveLedger,
+                currentLoveBalance: globalLoveBalanceState.loveBalance,
+                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                serverTimestamp: Date.now()
+              });
 
-              const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-              if (!delTxs.includes(replyTxId)) {
-                globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
-                syncBalancesFromLedger();
-                persistLoveState();
-                syncActiveDoraUserBalance();
-
-                io.emit('love_balance_broadcast', {
-                  action: 'TRANSACTION',
-                  target: 'user',
-                  amount: 1.00,
-                  type: 'credit',
-                  reason: 'Instant Reply (Within 5 Mins)',
-                  newEntry: replyEntry,
-                  loveLedger: globalLoveBalanceState.loveLedger,
-                  currentLoveBalance: globalLoveBalanceState.loveBalance,
-                  currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                  serverTimestamp: Date.now()
-                });
-
-                io.emit('love_balance_heartbeat_sync', {
-                  activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
-                  loveBalance: globalLoveBalanceState.loveBalance,
-                  adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                  currentLoveBalance: globalLoveBalanceState.loveBalance,
-                  currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                  loveLedger: globalLoveBalanceState.loveLedger,
-                  wishRequests: globalLoveBalanceState.wishRequests,
-                  dailySubmissions: memoryDailySubmissions,
-                  dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
-                  deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
-                  deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
-                  lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
-                  serverTimestamp: Date.now()
-                });
-              }
+              io.emit('love_balance_heartbeat_sync', {
+                activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+                loveBalance: globalLoveBalanceState.loveBalance,
+                adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                currentLoveBalance: globalLoveBalanceState.loveBalance,
+                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                loveLedger: globalLoveBalanceState.loveLedger,
+                wishRequests: globalLoveBalanceState.wishRequests,
+                dailySubmissions: memoryDailySubmissions,
+                dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
+                deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+                deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+                lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+                serverTimestamp: Date.now()
+              });
             }
           }
         }
-      } catch (e) {
-        console.warn("Error evaluating server instant reply rule:", e);
       }
+    } catch (e) {
+      console.warn("Error evaluating server instant reply rule:", e);
     }
   });
 
