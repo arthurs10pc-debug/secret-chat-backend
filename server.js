@@ -63,7 +63,7 @@ function calculateNetBalance(ledger, target = 'user') {
     .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
 
   const net = parseFloat((credits - debits - redeems).toFixed(2));
-  return Math.max(0, net);
+  return net;
 }
 
 function syncBalancesFromLedger() {
@@ -84,22 +84,6 @@ function sanitizeLedger(ledger) {
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
     )) continue;
-    // Purge ANY auto-debit habit/missed penalties
-    if (item.type === 'debit') {
-      const idStr = String(item.id || '');
-      const desc = String(item.description || '');
-      const rem = String(item.remarks || '');
-      if (
-        idStr.startsWith('habit_') || 
-        idStr.startsWith('penalty_') ||
-        desc.includes('Missed ') || 
-        desc.includes('Sleeping Without') ||
-        rem.includes('Missed ') ||
-        rem.includes('Sleeping Without')
-      ) {
-        continue;
-      }
-    }
     if (item.id) seen.add(item.id);
     cleaned.push(item);
   }
@@ -408,7 +392,7 @@ const codexCinemaState = {
 };
 
 app.get('/', (req, res) => {
-  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v18", buildTime: new Date().toISOString() });
+  res.send({ status: "Online", service: "Stealth Secret Chat & Arcade Engine v19", buildTime: new Date().toISOString() });
 });
 
 app.get('/api/yt-suggest', async (req, res) => {
@@ -909,6 +893,7 @@ app.get('/api/auth/users-directory', async (req, res) => {
 
 app.get('/api/daily-tasks/sync', async (req, res) => {
   try {
+    evaluateRoutineAndHabitInfractions();
     const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
     const mapSlots = new Map();
     DEFAULT_DAILY_SLOTS.filter(d => !activeDeleted.includes(d.id)).forEach(d => mapSlots.set(d.id, d));
@@ -1024,7 +1009,7 @@ async function getUsersDirectoryData() {
       isAdmin,
       isDora,
       loveBalance: isDora 
-        ? Math.max(Number(u.loveBalance || 0), Number(globalLoveBalanceState.loveBalance || 0))
+        ? (typeof globalLoveBalanceState.loveBalance === 'number' ? globalLoveBalanceState.loveBalance : 0)
         : (typeof u.loveBalance === 'number' ? u.loveBalance : 0),
       picture: u.picture || '',
       isOnline,
@@ -1087,7 +1072,9 @@ function evaluateRoutineAndHabitInfractions() {
     const currentMinutes = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
     const currentHour = istNow.getUTCHours();
 
-    const parseSlotEndMinutes = (timeRange) => {
+    const parseSlotEndMinutes = (slot) => {
+      if (!slot) return null;
+      const timeRange = slot.timeRange;
       if (!timeRange || typeof timeRange !== 'string') return null;
       const parts = timeRange.split('-').map(p => p.trim());
       if (parts.length < 2) return null;
@@ -1097,8 +1084,14 @@ function evaluateRoutineAndHabitInfractions() {
       let h = parseInt(timePart.slice(0, colonIdx), 10);
       let m = parseInt(timePart.slice(colonIdx + 1, colonIdx + 3) || '0', 10);
       if (isNaN(h)) return null;
-      if (h >= 1 && h <= 7) h += 12; // 01:00 PM to 07:00 PM
-      return h * 60 + m;
+      const tag = (slot.tag || '').toLowerCase();
+      // PM slots in daily routine (Lunch, Water, Tea, Dinner, Steps, Skincare)
+      if (['lunch', 'water', 'tea', 'dinner', 'steps', 'skincare'].includes(tag) && h < 12) {
+        h += 12;
+      } else if (h >= 1 && h <= 7) {
+        h += 12; // 01:00 PM to 07:00 PM
+      }
+      return h * 60 + (isNaN(m) ? 0 : m);
     };
 
     const isMorningMsg = (text) => {
@@ -1126,12 +1119,13 @@ function evaluateRoutineAndHabitInfractions() {
 
     const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
 
-    const hasEntry = (id, target, dateStr, keyword) => {
+    const hasEntry = (id, target, dateStr, keyword, type) => {
       if (delTxs.includes(id)) return true;
       return (globalLoveBalanceState.loveLedger || []).some(e => {
         if (!e) return false;
         if (e.id === id) return true;
         if (target && e.target !== target) return false;
+        if (type && e.type !== type) return false;
         if (dateStr && e.description && e.description.includes(dateStr)) {
           if (!keyword || e.description.includes(keyword)) return true;
         }
@@ -1140,7 +1134,7 @@ function evaluateRoutineAndHabitInfractions() {
     };
 
     const addHabitEntry = (id, target, type, amount, description, remarks, dateStr) => {
-      if (hasEntry(id, target, dateStr, description)) return;
+      if (hasEntry(id, target, dateStr, description, type)) return;
       const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
       const newEntry = {
         id,
@@ -1158,91 +1152,137 @@ function evaluateRoutineAndHabitInfractions() {
       ledgerChanged = true;
     };
 
-    // Evaluate past 14 days up to today
-    for (let i = 14; i >= 0; i--) {
+    // Evaluate past 30 days up to today (even if app opened 30 days later)
+    for (let i = 30; i >= 0; i--) {
       const d = new Date(istNow.getTime() - i * 86400000);
       const dayStr = d.toISOString().split('T')[0];
-      if (clearedDateStr && dayStr <= clearedDateStr) continue;
+      if (clearedDateStr && dayStr < clearedDateStr) continue;
 
       const nextDayStr = new Date(d.getTime() + 86400000).toISOString().split('T')[0];
       const isPastDay = dayStr < todayStr;
       const isToday = dayStr === todayStr;
 
-      // 1. MORNING GREETING (5:00 AM - 9:00 AM) - CREDITS ONLY
+      // 1. MORNING GREETING (5:00 AM - 9:00 AM)
       if (isPastDay || (isToday && currentHour >= 9)) {
         // Dora morning check
         const doraMId = `habit_morning_${dayStr}_user`;
-        if (!hasEntry(doraMId, 'user', dayStr, 'Morning')) {
-          const hadDoraMorning = msgs.some(m => {
-            if (!m || !m.timestamp) return false;
-            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-            const mDate = mIst.toISOString().split('T')[0];
-            const mHour = mIst.getUTCHours();
-            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
-            return isDora && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-          });
-          if (hadDoraMorning) {
+        const hadDoraMorning = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+          return isDora && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+        });
+        if (hadDoraMorning) {
+          if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'credit')) {
             addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
+          }
+        } else {
+          if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'debit')) {
+            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
           }
         }
 
         // Darsh morning check
         const darshMId = `habit_morning_${dayStr}_admin`;
-        if (!hasEntry(darshMId, 'admin', dayStr, 'Morning')) {
-          const hadDarshMorning = msgs.some(m => {
-            if (!m || !m.timestamp) return false;
-            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-            const mDate = mIst.toISOString().split('T')[0];
-            const mHour = mIst.getUTCHours();
-            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
-            return isDarsh && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-          });
-          if (hadDarshMorning) {
+        const hadDarshMorning = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+          return isDarsh && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+        });
+        if (hadDarshMorning) {
+          if (!hasEntry(darshMId, 'admin', dayStr, 'Morning', 'credit')) {
             addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
           }
         }
       }
 
-      // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning) - CREDITS ONLY
+      // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning)
       if (isPastDay) {
         // Dora night check
         const doraNId = `habit_night_${dayStr}_user`;
-        if (!hasEntry(doraNId, 'user', dayStr, 'Good Night')) {
-          const hadDoraNight = msgs.some(m => {
-            if (!m || !m.timestamp) return false;
-            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-            const mDate = mIst.toISOString().split('T')[0];
-            const mHour = mIst.getUTCHours();
-            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
-            const eve = mDate === dayStr && mHour >= 20;
-            const wee = mDate === nextDayStr && mHour < 5;
-            return isDora && (eve || wee) && isGoodNightMsg(m.text || '');
-          });
-          if (hadDoraNight) {
+        const hadDoraNight = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+          const eve = mDate === dayStr && mHour >= 20;
+          const wee = mDate === nextDayStr && mHour < 5;
+          return isDora && (eve || wee) && isGoodNightMsg(m.text || '');
+        });
+        if (hadDoraNight) {
+          if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'credit')) {
             addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
+          }
+        } else {
+          if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'debit')) {
+            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
           }
         }
 
         // Darsh night check
         const darshNId = `habit_night_${dayStr}_admin`;
-        if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night')) {
-          const hadDarshNight = msgs.some(m => {
-            if (!m || !m.timestamp) return false;
-            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-            const mDate = mIst.toISOString().split('T')[0];
-            const mHour = mIst.getUTCHours();
-            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
-            const eve = mDate === dayStr && mHour >= 20;
-            const wee = mDate === nextDayStr && mHour < 5;
-            return isDarsh && (eve || wee) && isGoodNightMsg(m.text || '');
-          });
-          if (hadDarshNight) {
+        const hadDarshNight = msgs.some(m => {
+          if (!m || !m.timestamp) return false;
+          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+          const mDate = mIst.toISOString().split('T')[0];
+          const mHour = mIst.getUTCHours();
+          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+          const eve = mDate === dayStr && mHour >= 20;
+          const wee = mDate === nextDayStr && mHour < 5;
+          return isDarsh && (eve || wee) && isGoodNightMsg(m.text || '');
+        });
+        if (hadDarshNight) {
+          if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night', 'credit')) {
             addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
           }
         }
       }
 
-      // 3. DAILY ROUTINE TASKS - ONLY REWARDED UPON ADMIN APPROVAL, NO AUTO-DEBITS EVER
+      // 3. DAILY ROUTINE TASKS (AUTOMATIC MISSED SLOT DEDUCTIONS)
+      activeSlots.forEach(slot => {
+        const slotEndMinutes = parseSlotEndMinutes(slot);
+        const isOverdue = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes > slotEndMinutes);
+        if (!isOverdue) return;
+
+        const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
+        const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
+
+        if (sub && sub.status === 'APPROVED') {
+          // If already approved, cancel/remove any previously added missed debit penalty
+          const existingDebitIdx = (globalLoveBalanceState.loveLedger || []).findIndex(e => e && e.id === slotTxId);
+          if (existingDebitIdx >= 0) {
+            globalLoveBalanceState.loveLedger.splice(existingDebitIdx, 1);
+            ledgerChanged = true;
+          }
+        } else if (sub && sub.status === 'PENDING' && (Boolean(sub.image) || Boolean(sub.note))) {
+          // Under review: do not penalize while awaiting review
+          const existingDebitIdx = (globalLoveBalanceState.loveLedger || []).findIndex(e => e && e.id === slotTxId);
+          if (existingDebitIdx >= 0) {
+            globalLoveBalanceState.loveLedger.splice(existingDebitIdx, 1);
+            ledgerChanged = true;
+          }
+        } else {
+          // Not submitted or rejected: DEDUCT MISSED ROUTINE TASK POINTS
+          if (!hasEntry(slotTxId, 'user', dayStr, slot.title, 'debit')) {
+            const penaltyPts = Math.abs(Number(slot.rewardPoints) || 2.0);
+            addHabitEntry(
+              slotTxId,
+              'user',
+              'debit',
+              penaltyPts,
+              `Missed Routine Task: ${slot.title} (${dayStr})`,
+              `Missed Routine Task Deadline (${slot.timeRange})`,
+              dayStr
+            );
+          }
+        }
+      });
     }
 
     // 4. ENSURE ALL APPROVED ROUTINE TASKS ARE CREDITED TO DORA
@@ -1250,7 +1290,7 @@ function evaluateRoutineAndHabitInfractions() {
       if (sub && sub.status === 'APPROVED' && (sub.pointsAwarded > 0 || sub.points > 0)) {
         const pts = parseFloat(sub.pointsAwarded || sub.points || 2.0);
         const subDate = sub.date || todayStr;
-        if (clearedDateStr && subDate <= clearedDateStr) return;
+        if (clearedDateStr && subDate < clearedDateStr) return;
         const approvalEntryId = 'lb_appr_' + (sub.id || `${subDate}_${sub.slotId}`);
         if (delTxs.includes(approvalEntryId)) return;
         const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalEntryId);
@@ -1279,11 +1319,34 @@ function evaluateRoutineAndHabitInfractions() {
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
+      syncActiveDoraUserBalance();
       io.emit('love_balance_broadcast', {
         action: 'SYNC_STATE_RESPONSE',
         loveBalance: globalLoveBalanceState.loveBalance,
         adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
         currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        wishRequests: globalLoveBalanceState.wishRequests,
+        dailySubmissions: memoryDailySubmissions,
+        dailySlots: activeSlots,
+        deletedSlotIds: globalLoveBalanceState.deletedSlotIds || []
+      });
+      io.emit('love_balance_heartbeat_sync', {
+        activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+        loveBalance: globalLoveBalanceState.loveBalance,
+        adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        wishRequests: globalLoveBalanceState.wishRequests,
+        dailySubmissions: memoryDailySubmissions,
+        dailySlots: activeSlots,
+        deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+        deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || []
+      });
+      broadcastUsersDirectory();
+    }
         currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
         loveLedger: globalLoveBalanceState.loveLedger,
         wishRequests: globalLoveBalanceState.wishRequests,
@@ -1885,6 +1948,7 @@ io.on('connection', (socket) => {
   // --- DAILY PROJECTS & HOURLY ROUTINE SOCKET ENGINE ---
   socket.on('daily_task_request_sync', async ({ date }) => {
     try {
+      evaluateRoutineAndHabitInfractions();
       const targetDate = date || new Date().toISOString().split('T')[0];
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
       let slots = (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id));
@@ -2031,8 +2095,14 @@ io.on('connection', (socket) => {
 
       // Award Love Balance points to Dora (deduplicated strictly by approval ID)
       if (pts > 0) {
-        const approvalEntryId = 'lb_appr_' + (submissionId || `${date || new Date().toISOString().split('T')[0]}_${slotId}`);
+        const targetDate = date || (updatedSubmission && updatedSubmission.date) || new Date().toISOString().split('T')[0];
+        const approvalEntryId = 'lb_appr_' + (submissionId || `${targetDate}_${slotId}`);
         const taskName = slotTitle || (updatedSubmission && updatedSubmission.slotTitle) || 'Daily Routine Task';
+        const missedDebitId = `habit_routine_${slotId}_${targetDate}_user`;
+
+        // Cancel and remove any previously added missed debit penalty for this approved slot
+        globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(e => e && e.id !== missedDebitId);
+
         const alreadyExists = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalEntryId);
         if (!alreadyExists) {
           const newEntry = {
@@ -2048,37 +2118,38 @@ io.on('connection', (socket) => {
             status: 'Confirmed'
           };
           globalLoveBalanceState.loveLedger = [newEntry, ...(globalLoveBalanceState.loveLedger || [])];
-          persistLoveState();
-          syncActiveDoraUserBalance();
-
-          io.emit('love_balance_broadcast', {
-            action: 'TRANSACTION',
-            target: 'user',
-            amount: pts,
-            type: 'credit',
-            reason: 'Daily Task Approved: ' + taskName,
-            newEntry,
-            loveLedger: globalLoveBalanceState.loveLedger,
-            currentLoveBalance: globalLoveBalanceState.loveBalance,
-            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-            serverTimestamp: Date.now()
-          });
-
-          io.emit('love_balance_heartbeat_sync', {
-            loveBalance: globalLoveBalanceState.loveBalance,
-            adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-            currentLoveBalance: globalLoveBalanceState.loveBalance,
-            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-            loveLedger: globalLoveBalanceState.loveLedger,
-            wishRequests: globalLoveBalanceState.wishRequests,
-            dailySubmissions: memoryDailySubmissions,
-            dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
-            deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
-            deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
-            lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
-            serverTimestamp: Date.now()
-          });
         }
+        persistLoveState();
+        syncActiveDoraUserBalance();
+        broadcastUsersDirectory();
+
+        io.emit('love_balance_broadcast', {
+          action: 'TRANSACTION',
+          target: 'user',
+          amount: pts,
+          type: 'credit',
+          reason: 'Daily Task Approved: ' + taskName,
+          loveLedger: globalLoveBalanceState.loveLedger,
+          currentLoveBalance: globalLoveBalanceState.loveBalance,
+          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          serverTimestamp: Date.now()
+        });
+
+        io.emit('love_balance_heartbeat_sync', {
+          activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+          loveBalance: globalLoveBalanceState.loveBalance,
+          adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          currentLoveBalance: globalLoveBalanceState.loveBalance,
+          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          loveLedger: globalLoveBalanceState.loveLedger,
+          wishRequests: globalLoveBalanceState.wishRequests,
+          dailySubmissions: memoryDailySubmissions,
+          dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
+          deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+          deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+          lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+          serverTimestamp: Date.now()
+        });
       }
 
       io.emit('daily_task_submission_updated', {
@@ -2122,6 +2193,7 @@ io.on('connection', (socket) => {
         submission: updatedSubmission,
         rejected: true
       });
+      evaluateRoutineAndHabitInfractions();
     } catch (err) {
       console.error('Error in daily_task_reject:', err);
     }
