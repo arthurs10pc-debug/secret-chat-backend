@@ -340,6 +340,13 @@ async function seedDefaultSlotsIfEmpty() {
         }
         console.log('Seeded initial default daily task slots.');
       }
+      // Always hydrate memoryDailySlots from MongoDB so custom slots are never lost
+      const dbSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1, createdAt: 1 }).lean();
+      if (Array.isArray(dbSlots) && dbSlots.length > 0) {
+        memoryDailySlots = dbSlots;
+        globalLoveBalanceState.dailySlots = dbSlots;
+        return;
+      }
     }
 
     const map = new Map();
@@ -889,24 +896,89 @@ app.get('/api/daily-tasks/sync', async (req, res) => {
   try {
     evaluateRoutineAndHabitInfractions();
     const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
-    const mapSlots = new Map();
-    DEFAULT_DAILY_SLOTS.filter(d => !activeDeleted.includes(d.id)).forEach(d => mapSlots.set(d.id, d));
-    (memoryDailySlots || []).filter(s => s && s.id && !activeDeleted.includes(s.id)).forEach(s => mapSlots.set(s.id, s));
-    const slots = Array.from(mapSlots.values()).sort((a, b) => (a.order || 0) - (b.order || 0));
+    let slots = [...memoryDailySlots];
+    if (mongoose.connection.readyState === 1) {
+      const dbSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1, createdAt: 1 }).lean();
+      if (dbSlots && dbSlots.length > 0) {
+        slots = dbSlots;
+        memoryDailySlots = dbSlots;
+      }
+    }
+    const cleanSlots = slots.filter(s => s && !activeDeleted.includes(s.id)).sort((a, b) => (a.order || 0) - (b.order || 0));
 
     let submissions = memoryDailySubmissions;
     if (mongoose.connection.readyState === 1) {
       const past30Days = new Date(Date.now() - 30 * 86400000);
       submissions = await DailyTaskSubmission.find({ createdAt: { $gte: past30Days } }).lean();
+      if (submissions && submissions.length > 0) {
+        memoryDailySubmissions = submissions;
+      }
     }
     return res.json({
       success: true,
-      slots,
+      slots: cleanSlots,
       submissions,
       deletedSlotIds: activeDeleted
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/daily-tasks/slots/save', async (req, res) => {
+  try {
+    const slot = req.body;
+    if (!slot || !slot.id) return res.status(400).json({ error: 'Valid slot required' });
+
+    // Un-delete if previously deleted
+    globalLoveBalanceState.deletedSlotIds = (globalLoveBalanceState.deletedSlotIds || []).filter(id => id !== slot.id);
+
+    const existingIdx = memoryDailySlots.findIndex(s => s.id === slot.id);
+    if (existingIdx >= 0) {
+      memoryDailySlots[existingIdx] = { ...memoryDailySlots[existingIdx], ...slot };
+    } else {
+      memoryDailySlots.push(slot);
+    }
+    globalLoveBalanceState.dailySlots = memoryDailySlots;
+    persistLoveState();
+
+    if (mongoose.connection.readyState === 1) {
+      await DailyTaskSlot.findOneAndUpdate(
+        { id: slot.id },
+        slot,
+        { upsert: true, new: true }
+      ).catch(() => {});
+    }
+
+    // Immediately evaluate routine infractions (in case deadline has passed)
+    evaluateRoutineAndHabitInfractions();
+
+    // Broadcast to all clients (both Admin and Dora)
+    io.emit('daily_slots_updated', {
+      slots: memoryDailySlots,
+      deletedSlotIds: globalLoveBalanceState.deletedSlotIds
+    });
+    io.emit('love_balance_broadcast', {
+      action: 'SYNC_STATE_RESPONSE',
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      currentLoveBalance: globalLoveBalanceState.loveBalance,
+      currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger,
+      wishRequests: globalLoveBalanceState.wishRequests,
+      dailySubmissions: memoryDailySubmissions,
+      dailySlots: memoryDailySlots,
+      deletedSlotIds: globalLoveBalanceState.deletedSlotIds
+    });
+
+    return res.json({
+      success: true,
+      slot,
+      slots: memoryDailySlots,
+      loveBalance: globalLoveBalanceState.loveBalance
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -1113,22 +1185,22 @@ function evaluateRoutineAndHabitInfractions() {
 
     const msgs = Array.isArray(memoryMessages) ? memoryMessages : [];
 
-    const hasEntry = (id, target, dateStr, keyword, type) => {
+    const hasEntry = (id, target, dateStr, exactSlotId, type) => {
       if (delTxs.includes(id)) return true;
       return (globalLoveBalanceState.loveLedger || []).some(e => {
         if (!e) return false;
         if (e.id === id) return true;
         if (target && e.target !== target) return false;
         if (type && e.type !== type) return false;
-        if (dateStr && e.description && e.description.includes(dateStr)) {
-          if (!keyword || e.description.includes(keyword)) return true;
+        if (exactSlotId) {
+          if (e.id && (e.id === `habit_routine_${exactSlotId}_${dateStr}_${target}` || e.id === `habit_routine_${exactSlotId}_${dateStr}_user`)) return true;
         }
         return false;
       });
     };
 
-    const addHabitEntry = (id, target, type, amount, description, remarks, dateStr) => {
-      if (hasEntry(id, target, dateStr, description, type)) return;
+    const addHabitEntry = (id, target, type, amount, description, remarks, dateStr, exactSlotId) => {
+      if (hasEntry(id, target, dateStr, exactSlotId, type)) return;
       const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
       const newEntry = {
         id,
@@ -1263,7 +1335,7 @@ function evaluateRoutineAndHabitInfractions() {
           }
         } else {
           // Not submitted or rejected: DEDUCT MISSED ROUTINE TASK POINTS
-          if (!hasEntry(slotTxId, 'user', dayStr, slot.title, 'debit')) {
+          if (!hasEntry(slotTxId, 'user', dayStr, slot.id, 'debit')) {
             const penaltyPts = Math.abs(Number(slot.rewardPoints) || 2.0);
             addHabitEntry(
               slotTxId,
@@ -1272,7 +1344,8 @@ function evaluateRoutineAndHabitInfractions() {
               penaltyPts,
               `Missed Routine Task: ${slot.title} (${dayStr})`,
               `Missed Routine Task Deadline (${slot.timeRange})`,
-              dayStr
+              dayStr,
+              slot.id
             );
           }
         }
