@@ -1,9 +1,24 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const CryptoJS = require('crypto-js');
+
+const SECRET_KEY = "StealthMasterKey99";
+
+function decryptText(ciphertext) {
+  if (!ciphertext || typeof ciphertext !== 'string') return '';
+  try {
+    const bytes = CryptoJS.AES.decrypt(ciphertext, SECRET_KEY);
+    return bytes.toString(CryptoJS.enc.Utf8) || '';
+  } catch (e) {
+    return '';
+  }
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -172,7 +187,7 @@ mongoose.connect(MONGO_URI)
       const dbMsgs = await Message.find({ timestamp: { $gte: past30Days } }).lean();
       if (Array.isArray(dbMsgs) && dbMsgs.length > 0) {
         memoryMessages.length = 0;
-        memoryMessages.push(...dbMsgs);
+        memoryMessages.push(...dbMsgs.map(m => ({ ...m, text: m.text || decryptText(m.encryptedText) })));
       }
       const dbSubs = await DailyTaskSubmission.find({ createdAt: { $gte: past30Days } }).lean();
       if (Array.isArray(dbSubs) && dbSubs.length > 0) {
@@ -2408,12 +2423,16 @@ io.on('connection', (socket) => {
     const { room, role, encryptedText, isMedia, replyRefId } = data;
     io.emit('peer_typing_status', { isTyping: false });
 
+    const plainText = decryptText(encryptedText);
+    const msgTimestamp = new Date();
+
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
       room,
       senderRole: role,
       encryptedText,
-      timestamp: new Date(),
+      text: plainText,
+      timestamp: msgTimestamp,
       flaggedPending: false,
       isSeen: false,
       isMedia: Boolean(isMedia),
@@ -2422,16 +2441,103 @@ io.on('connection', (socket) => {
       replyRefId: replyRefId || null
     };
 
+    // Always push to in-memory messages for instant real-time parity
+    memoryMessages.push(newMsgData);
+
     io.to(room).emit('receive_stealth_msg', newMsgData);
 
     try {
       if (mongoose.connection.readyState === 1) {
         Message.create(newMsgData).catch(console.error);
-      } else {
-        memoryMessages.push(newMsgData);
       }
     } catch (err) {
       console.error("Error saving message:", err);
+    }
+
+    // --- REAL-TIME SERVER-SIDE MESSAGE KARMA EVALUATION FOR DORA ---
+    // Rule: When Dora (role === 'user' or 'A') sends an instant reply to Darsh within 5 minutes, award Dora +1.00 Point
+    if (role === 'user' || role === 'A') {
+      try {
+        const priorAdminMsgs = memoryMessages.filter(m => 
+          m && m.room === room && 
+          m._id !== newMsgData._id &&
+          (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H') &&
+          m.timestamp
+        );
+        const lastAdminMsg = priorAdminMsgs.length > 0 ? priorAdminMsgs[priorAdminMsgs.length - 1] : null;
+
+        if (lastAdminMsg && lastAdminMsg.timestamp) {
+          const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastAdminMsg.timestamp).getTime());
+          if (diffMs <= 5 * 60 * 1000) {
+            // Check 5-minute cooldown to prevent spam
+            const existingInstant = (globalLoveBalanceState.loveLedger || []).find(e => 
+              e && e.target === 'user' && e.type === 'credit' && (e.description || '').includes('Instant Reply')
+            );
+            const lastInstantTime = existingInstant ? new Date(existingInstant.earnedAt || 0).getTime() : 0;
+            const cooldownPassed = !existingInstant || isNaN(lastInstantTime) || (Date.now() - lastInstantTime >= 4 * 60 * 1000);
+
+            if (cooldownPassed) {
+              const replyTxId = `lb_instant_${Date.now()}_user`;
+              const nowStr = new Date().toLocaleString('en-GB');
+              const expDate = new Date();
+              expDate.setMonth(expDate.getMonth() + 1);
+              const expStr = expDate.toLocaleDateString('en-GB');
+
+              const replyEntry = {
+                id: replyTxId,
+                sl: 1,
+                target: 'user',
+                description: '[Dora] Instant Reply (Within 5 Mins)',
+                earnedAt: nowStr,
+                expireDate: expStr,
+                points: 1.00,
+                type: 'credit',
+                remarks: 'Instant Reply (Within 5 Mins)',
+                status: 'Confirmed'
+              };
+
+              const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+              if (!delTxs.includes(replyTxId)) {
+                globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
+                syncBalancesFromLedger();
+                persistLoveState();
+                syncActiveDoraUserBalance();
+
+                io.emit('love_balance_broadcast', {
+                  action: 'TRANSACTION',
+                  target: 'user',
+                  amount: 1.00,
+                  type: 'credit',
+                  reason: 'Instant Reply (Within 5 Mins)',
+                  newEntry: replyEntry,
+                  loveLedger: globalLoveBalanceState.loveLedger,
+                  currentLoveBalance: globalLoveBalanceState.loveBalance,
+                  currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                  serverTimestamp: Date.now()
+                });
+
+                io.emit('love_balance_heartbeat_sync', {
+                  activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+                  loveBalance: globalLoveBalanceState.loveBalance,
+                  adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                  currentLoveBalance: globalLoveBalanceState.loveBalance,
+                  currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                  loveLedger: globalLoveBalanceState.loveLedger,
+                  wishRequests: globalLoveBalanceState.wishRequests,
+                  dailySubmissions: memoryDailySubmissions,
+                  dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
+                  deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+                  deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+                  lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+                  serverTimestamp: Date.now()
+                });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Error evaluating server instant reply rule:", e);
+      }
     }
   });
 
