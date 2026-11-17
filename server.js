@@ -227,11 +227,6 @@ mongoose.connect(MONGO_URI)
       if (Array.isArray(dbUsers) && dbUsers.length > 0) {
         dbUsers.forEach(u => {
           if (u && u.email && u.email.toLowerCase() !== 'dora@gmail.com') {
-            memoryUsers.set(u.email.toLowerCase(), { ...u, email: u.email.toLowerCase() });
-          }
-        });
-      }
-          if (u && u.email) {
             const k = u.email.toLowerCase();
             const isAdmin = k === 'arthurs10pc@gmail.com';
             memoryUsers.set(k, {
@@ -248,6 +243,7 @@ mongoose.connect(MONGO_URI)
             });
           }
         });
+      }
         const activeDora = Array.from(memoryUsers.values()).find(u => !u.isAdmin && u.isDora);
         if (activeDora) {
           globalLoveBalanceState.activeDoraEmail = activeDora.email;
@@ -260,7 +256,6 @@ mongoose.connect(MONGO_URI)
           }
           persistLoveState();
         }
-      }
     } catch (err) {
       console.warn("Error reading Love Balance from MongoDB:", err);
     }
@@ -724,22 +719,6 @@ function syncActiveDoraUserBalance() {
       { upsert: true }
     ).catch(() => {});
   }
-      isDora: true,
-      loveBalance: globalLoveBalanceState.loveBalance,
-      loveLedger: []
-    };
-    memoryUsers.set(activeEmail, doraUser);
-  }
-  const userLedger = (globalLoveBalanceState.loveLedger || []).filter(e => e && e.target !== 'admin' && !(e.description && e.description.includes('[Darsh]')));
-  doraUser.loveBalance = globalLoveBalanceState.loveBalance;
-  doraUser.loveLedger = userLedger;
-  if (mongoose.connection.readyState === 1) {
-    UserModel.findOneAndUpdate(
-      { email: activeEmail },
-      { $set: { loveBalance: globalLoveBalanceState.loveBalance, loveLedger: userLedger } },
-      { upsert: true }
-    ).catch(() => {});
-  }
 }
 
 app.post('/api/user/sync-state', async (req, res) => {
@@ -884,8 +863,23 @@ app.post('/api/admin/delete-user', async (req, res) => {
 
 app.get('/api/auth/users-directory', async (req, res) => {
   try {
+    evaluateRoutineAndHabitInfractions();
     const directory = await getUsersDirectoryData();
     return res.json({ success: true, ...directory });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/love-balance/evaluate', (req, res) => {
+  try {
+    evaluateRoutineAndHabitInfractions();
+    return res.json({
+      success: true,
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -1347,14 +1341,6 @@ function evaluateRoutineAndHabitInfractions() {
       });
       broadcastUsersDirectory();
     }
-        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-        loveLedger: globalLoveBalanceState.loveLedger,
-        wishRequests: globalLoveBalanceState.wishRequests,
-        dailySubmissions: memoryDailySubmissions,
-        dailySlots: activeSlots,
-        deletedSlotIds: globalLoveBalanceState.deletedSlotIds || []
-      });
-    }
   } catch (err) {
     console.error('Error in evaluateRoutineAndHabitInfractions:', err);
   }
@@ -1693,6 +1679,7 @@ io.on('connection', (socket) => {
       syncActiveDoraUserBalance();
       data.newEntry = newEntry;
     } else if (data.action === 'REQUEST_SYNC') {
+      evaluateRoutineAndHabitInfractions();
       if (Array.isArray(data.deletedSlotIds) && data.deletedSlotIds.length > 0) {
         globalLoveBalanceState.deletedSlotIds = Array.from(new Set([
           ...(globalLoveBalanceState.deletedSlotIds || []),
