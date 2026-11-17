@@ -86,6 +86,8 @@ function syncBalancesFromLedger() {
   globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
 }
 
+const SYSTEM_START_DATE = '2026-11-17';
+
 function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
   const seen = new Set();
@@ -99,6 +101,13 @@ function sanitizeLedger(ledger) {
       item.description.includes('Announcement Read') ||
       item.description.includes('Monthly Punctuality Reward')
     )) continue;
+    // Purge any auto-habit or missed penalties from before today (Nov 17, 2026 onwards system)
+    if (item.id && (item.id.startsWith('habit_') || item.id.startsWith('penalty_'))) {
+      const dateMatch = (item.id + ' ' + (item.description || '')).match(/(\d{4}-\d{2}-\d{2})/);
+      if (dateMatch && dateMatch[1] < SYSTEM_START_DATE) {
+        continue;
+      }
+    }
     if (item.id) seen.add(item.id);
     cleaned.push(item);
   }
@@ -226,7 +235,9 @@ mongoose.connect(MONGO_URI)
         } else {
           globalLoveBalanceState.activeDoraEmail = '';
         }
+        syncBalancesFromLedger();
         persistLoveState();
+        syncActiveDoraUserBalance();
         console.log("Synchronized Love Balance from MongoDB: Dora ₹", globalLoveBalanceState.loveBalance, "| Darsh ₹", globalLoveBalanceState.adminLoveBalance);
       }
 
@@ -1233,10 +1244,11 @@ function evaluateRoutineAndHabitInfractions() {
       ledgerChanged = true;
     };
 
-    // Evaluate past 30 days up to today (even if app opened 30 days later)
+    // Evaluate routine and habits strictly starting from today morning (SYSTEM_START_DATE: '2026-11-17') onwards
     for (let i = 30; i >= 0; i--) {
       const d = new Date(istNow.getTime() - i * 86400000);
       const dayStr = d.toISOString().split('T')[0];
+      if (dayStr < SYSTEM_START_DATE) continue;
       if (clearedDateStr && dayStr < clearedDateStr) continue;
 
       const nextDayStr = new Date(d.getTime() + 86400000).toISOString().split('T')[0];
