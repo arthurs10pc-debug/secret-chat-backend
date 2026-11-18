@@ -1695,35 +1695,12 @@ io.on('connection', (socket) => {
     io.emit('launch_game_session', gameObj);
   });
 
-  socket.on('arcade_game_action', (moveData) => {
-    socket.broadcast.emit('arcade_game_action_broadcast', moveData);
-  });
-
   // --- REAL-TIME COUPLE MINI-GAMES AUTHORITATIVE ENGINE (TIC-TAC-TOE & LUDO) ---
-  socket.on('couple_game_get_state', ({ gameId }) => {
-    const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
-    socket.emit('couple_game_state_sync', {
-      gameId: targetGame,
-      state: globalCoupleGamesState[targetGame] || {},
-      activeChallenge: globalCoupleGamesState.activeChallenge
-    });
-  });
-
-  socket.on('couple_game_invite', (inviteData) => {
-    globalCoupleGamesState.activeChallenge = inviteData;
-    io.emit('couple_game_invite_broadcast', inviteData);
-  });
-
-  socket.on('couple_game_invite_clear', () => {
-    globalCoupleGamesState.activeChallenge = null;
-    io.emit('couple_game_invite_clear');
-  });
-
-  socket.on('couple_game_action', async (gameData) => {
+  const handleGameActionInternal = async (gameData) => {
     try {
       if (!gameData) return;
       const { type, gameId, betAmount, winner, isDraw, board, tokens, turn, dice, statusMsg, scores } = gameData;
-      const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
+      const targetGame = (gameId === 'ludo' || (!board && tokens)) ? 'ludo' : 'tictactoe';
 
       if (!globalCoupleGamesState[targetGame]) {
         globalCoupleGamesState[targetGame] = {};
@@ -1805,15 +1782,42 @@ io.on('connection', (socket) => {
         }
       }
 
-      // Broadcast updated authoritative state to EVERY connected client in the app!
+      // Broadcast updated authoritative state to EVERY connected client on both channels!
       io.emit('couple_game_broadcast', {
         ...gameData,
         gameId: targetGame,
         state: globalCoupleGamesState[targetGame]
       });
+      io.emit('arcade_game_action_broadcast', {
+        ...gameData,
+        gameId: targetGame,
+        ...globalCoupleGamesState[targetGame]
+      });
     } catch (err) {
-      console.error('Error in couple_game_action:', err);
+      console.error('Error in handleGameActionInternal:', err);
     }
+  };
+
+  socket.on('arcade_game_action', handleGameActionInternal);
+  socket.on('couple_game_action', handleGameActionInternal);
+
+  socket.on('couple_game_get_state', ({ gameId }) => {
+    const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
+    socket.emit('couple_game_state_sync', {
+      gameId: targetGame,
+      state: globalCoupleGamesState[targetGame] || {},
+      activeChallenge: globalCoupleGamesState.activeChallenge
+    });
+  });
+
+  socket.on('couple_game_invite', (inviteData) => {
+    globalCoupleGamesState.activeChallenge = inviteData;
+    io.emit('couple_game_invite_broadcast', inviteData);
+  });
+
+  socket.on('couple_game_invite_clear', () => {
+    globalCoupleGamesState.activeChallenge = null;
+    io.emit('couple_game_invite_clear');
   });
 
   socket.on('request_peer_balance', (data) => {
