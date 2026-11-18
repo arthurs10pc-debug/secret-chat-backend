@@ -1675,57 +1675,64 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
-  // --- REAL-TIME COUPLE MINI-GAMES ENGINE (TIC-TAC-TOE & BETTING POT) ---
+  // --- REAL-TIME COUPLE MINI-GAMES ENGINE (TIC-TAC-TOE, LUDO & BETTING POT) ---
+  socket.on('couple_game_invite', (inviteData) => {
+    socket.broadcast.emit('couple_game_invite_broadcast', inviteData);
+  });
+
   socket.on('couple_game_action', async (gameData) => {
     try {
       if (!gameData) return;
       const { type, gameId, betAmount, winner, isDraw, board, turn } = gameData;
       
       if (type === 'MATCH_FINISH' && winner) {
-        const bet = round2(betAmount || 2.0);
+        const bet = round2(betAmount || 0);
         const winnerTarget = winner === 'H' ? 'admin' : 'user';
         const loserTarget = winner === 'H' ? 'user' : 'admin';
         const winnerLabel = winner === 'H' ? 'Darsh' : 'Dora';
         const loserLabel = winner === 'H' ? 'Dora' : 'Darsh';
+        const gameLabel = gameId === 'ludo' ? 'Ludo Royale' : 'Couple Tic-Tac-Toe';
 
-        const winEntry = {
-          id: `game_win_${Date.now()}_${winnerTarget}`,
-          sl: 1,
-          target: winnerTarget,
-          description: `[${winnerLabel}] 🏆 Won Couple Tic-Tac-Toe vs ${loserLabel}`,
-          earnedAt: new Date().toLocaleString('en-GB'),
-          expireDate: '',
-          points: bet,
-          type: 'credit',
-          remarks: `Won match pot (Bet: ₹${bet.toFixed(2)})`,
-          status: 'Confirmed'
-        };
+        if (bet > 0) {
+          const winEntry = {
+            id: `game_win_${Date.now()}_${winnerTarget}`,
+            sl: 1,
+            target: winnerTarget,
+            description: `[${winnerLabel}] 🏆 Won ${gameLabel} vs ${loserLabel}`,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: bet,
+            type: 'credit',
+            remarks: `Won match pot (Bet: ₹${bet.toFixed(2)})`,
+            status: 'Confirmed'
+          };
 
-        const loseEntry = {
-          id: `game_lose_${Date.now()}_${loserTarget}`,
-          sl: 1,
-          target: loserTarget,
-          description: `[${loserLabel}] 🎲 Couple Tic-Tac-Toe Match Bet`,
-          earnedAt: new Date().toLocaleString('en-GB'),
-          expireDate: '',
-          points: -bet,
-          type: 'debit',
-          remarks: `Match bet lost to ${winnerLabel}`,
-          status: 'Deducted'
-        };
+          const loseEntry = {
+            id: `game_lose_${Date.now()}_${loserTarget}`,
+            sl: 1,
+            target: loserTarget,
+            description: `[${loserLabel}] 🎲 ${gameLabel} Match Bet`,
+            earnedAt: new Date().toLocaleString('en-GB'),
+            expireDate: '',
+            points: -bet,
+            type: 'debit',
+            remarks: `Match bet lost to ${winnerLabel}`,
+            status: 'Deducted'
+          };
 
-        globalLoveBalanceState.loveLedger = sanitizeLedger([winEntry, loseEntry, ...(globalLoveBalanceState.loveLedger || [])]);
-        syncBalancesFromLedger();
-        persistLoveState();
-        syncActiveDoraUserBalance();
+          globalLoveBalanceState.loveLedger = sanitizeLedger([winEntry, loseEntry, ...(globalLoveBalanceState.loveLedger || [])]);
+          syncBalancesFromLedger();
+          persistLoveState();
+          syncActiveDoraUserBalance();
 
-        io.emit('love_balance_broadcast', {
-          action: 'TRANSACTION',
-          loveLedger: globalLoveBalanceState.loveLedger,
-          currentLoveBalance: globalLoveBalanceState.loveBalance,
-          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-          serverTimestamp: Date.now()
-        });
+          io.emit('love_balance_broadcast', {
+            action: 'TRANSACTION',
+            loveLedger: globalLoveBalanceState.loveLedger,
+            currentLoveBalance: globalLoveBalanceState.loveBalance,
+            currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+            serverTimestamp: Date.now()
+          });
+        }
       }
 
       // Relay move to partner in real time
