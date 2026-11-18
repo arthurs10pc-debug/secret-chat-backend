@@ -1526,6 +1526,30 @@ setInterval(() => {
   });
 }, 4000);
 
+const globalCoupleGamesState = {
+  tictactoe: {
+    board: Array(9).fill(null),
+    turn: 'H',
+    betAmount: 2.0,
+    scores: { H: 0, A: 0 },
+    gameStatus: 'PLAYING',
+    winner: null,
+    isDraw: false,
+    lastActionAt: Date.now()
+  },
+  ludo: {
+    tokens: { H: [-1, -1, -1, -1], A: [-1, -1, -1, -1] },
+    turn: 'H',
+    dice: 6,
+    statusMsg: 'Game ready! Darsh rolls first.',
+    scores: { H: 0, A: 0 },
+    betAmount: 2.0,
+    winner: null,
+    lastActionAt: Date.now()
+  },
+  activeChallenge: null
+};
+
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
@@ -1675,15 +1699,61 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
-  // --- REAL-TIME COUPLE MINI-GAMES ENGINE (TIC-TAC-TOE, LUDO & BETTING POT) ---
+  // --- REAL-TIME COUPLE MINI-GAMES AUTHORITATIVE ENGINE (TIC-TAC-TOE & LUDO) ---
+  socket.on('couple_game_get_state', ({ gameId }) => {
+    const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
+    socket.emit('couple_game_state_sync', {
+      gameId: targetGame,
+      state: globalCoupleGamesState[targetGame] || {},
+      activeChallenge: globalCoupleGamesState.activeChallenge
+    });
+  });
+
   socket.on('couple_game_invite', (inviteData) => {
-    socket.broadcast.emit('couple_game_invite_broadcast', inviteData);
+    globalCoupleGamesState.activeChallenge = inviteData;
+    io.emit('couple_game_invite_broadcast', inviteData);
+  });
+
+  socket.on('couple_game_invite_clear', () => {
+    globalCoupleGamesState.activeChallenge = null;
+    io.emit('couple_game_invite_clear');
   });
 
   socket.on('couple_game_action', async (gameData) => {
     try {
       if (!gameData) return;
-      const { type, gameId, betAmount, winner, isDraw, board, turn } = gameData;
+      const { type, gameId, betAmount, winner, isDraw, board, tokens, turn, dice, statusMsg, scores } = gameData;
+      const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
+
+      if (!globalCoupleGamesState[targetGame]) {
+        globalCoupleGamesState[targetGame] = {};
+      }
+      if (board) globalCoupleGamesState[targetGame].board = board;
+      if (tokens) globalCoupleGamesState[targetGame].tokens = tokens;
+      if (turn) globalCoupleGamesState[targetGame].turn = turn;
+      if (dice !== undefined) globalCoupleGamesState[targetGame].dice = dice;
+      if (statusMsg) globalCoupleGamesState[targetGame].statusMsg = statusMsg;
+      if (scores) globalCoupleGamesState[targetGame].scores = scores;
+      if (betAmount !== undefined) globalCoupleGamesState[targetGame].betAmount = betAmount;
+      if (winner !== undefined) globalCoupleGamesState[targetGame].winner = winner;
+      if (isDraw !== undefined) globalCoupleGamesState[targetGame].isDraw = isDraw;
+
+      if (type === 'RESET') {
+        if (targetGame === 'tictactoe') {
+          globalCoupleGamesState.tictactoe.board = Array(9).fill(null);
+          globalCoupleGamesState.tictactoe.turn = 'H';
+          globalCoupleGamesState.tictactoe.winner = null;
+          globalCoupleGamesState.tictactoe.isDraw = false;
+          globalCoupleGamesState.tictactoe.gameStatus = 'PLAYING';
+        } else {
+          globalCoupleGamesState.ludo.tokens = { H: [-1, -1, -1, -1], A: [-1, -1, -1, -1] };
+          globalCoupleGamesState.ludo.turn = 'H';
+          globalCoupleGamesState.ludo.dice = 6;
+          globalCoupleGamesState.ludo.winner = null;
+          globalCoupleGamesState.ludo.statusMsg = 'Match reset! Darsh rolls first.';
+        }
+      }
+      globalCoupleGamesState[targetGame].lastActionAt = Date.now();
       
       if (type === 'MATCH_FINISH' && winner) {
         const bet = round2(betAmount || 0);
@@ -1691,7 +1761,7 @@ io.on('connection', (socket) => {
         const loserTarget = winner === 'H' ? 'user' : 'admin';
         const winnerLabel = winner === 'H' ? 'Darsh' : 'Dora';
         const loserLabel = winner === 'H' ? 'Dora' : 'Darsh';
-        const gameLabel = gameId === 'ludo' ? 'Ludo Royale' : 'Couple Tic-Tac-Toe';
+        const gameLabel = targetGame === 'ludo' ? 'Ludo Royale' : 'Couple Tic-Tac-Toe';
 
         if (bet > 0) {
           const winEntry = {
@@ -1735,8 +1805,12 @@ io.on('connection', (socket) => {
         }
       }
 
-      // Relay move to partner in real time
-      socket.broadcast.emit('couple_game_broadcast', gameData);
+      // Broadcast updated authoritative state to EVERY connected client in the app!
+      io.emit('couple_game_broadcast', {
+        ...gameData,
+        gameId: targetGame,
+        state: globalCoupleGamesState[targetGame]
+      });
     } catch (err) {
       console.error('Error in couple_game_action:', err);
     }
