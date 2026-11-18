@@ -77,8 +77,32 @@ function calculateNetBalance(ledger, target = 'user') {
     .filter(e => e.type === 'redeem' || e.status === 'Redeemed')
     .reduce((sum, e) => sum + Math.abs(Number(e.points) || 0), 0);
 
-  const net = parseFloat((credits - debits - redeems).toFixed(2));
-  return net;
+  return round2(credits - debits - redeems);
+}
+
+function round2(num) {
+  return Math.round((Number(num) || 0) * 100) / 100;
+}
+
+function getISTDate(date = new Date()) {
+  const d = new Date(date);
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  return new Date(d.getTime() + istOffset);
+}
+
+function getISTDateString(date = new Date()) {
+  return getISTDate(date).toISOString().split('T')[0];
+}
+
+function computeAuditHash(entry, prevHash = 'GENESIS_BLOCK_0') {
+  const payload = `${prevHash}|${entry.id}|${entry.target}|${round2(entry.points)}|${entry.type}|${entry.earnedAt}|${entry.remarks || ''}`;
+  return CryptoJS.SHA256(payload).toString().substring(0, 16);
+}
+
+function isSocketAdmin(socket, data = {}) {
+  const role = socket.role || data.senderRole || data.role;
+  const email = (socket.userEmail || data.userEmail || data.email || '').toLowerCase();
+  return role === 'parent' || role === 'admin' || email === 'arthurs10pc@gmail.com';
 }
 
 function syncBalancesFromLedger() {
@@ -92,6 +116,7 @@ function sanitizeLedger(ledger) {
   if (!Array.isArray(ledger)) return [];
   const seen = new Set();
   const cleaned = [];
+  let prevHash = 'GENESIS_BLOCK_0';
   for (const item of ledger) {
     if (!item) continue;
     if (item.id && seen.has(item.id)) continue;
@@ -108,6 +133,11 @@ function sanitizeLedger(ledger) {
         continue;
       }
     }
+    item.points = round2(item.points);
+    if (!item.auditHash) {
+      item.auditHash = computeAuditHash(item, prevHash);
+    }
+    prevHash = item.auditHash;
     if (item.id) seen.add(item.id);
     cleaned.push(item);
   }
@@ -1645,6 +1675,66 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('arcade_game_action_broadcast', moveData);
   });
 
+  // --- REAL-TIME COUPLE MINI-GAMES ENGINE (TIC-TAC-TOE & BETTING POT) ---
+  socket.on('couple_game_action', async (gameData) => {
+    try {
+      if (!gameData) return;
+      const { type, gameId, betAmount, winner, isDraw, board, turn } = gameData;
+      
+      if (type === 'MATCH_FINISH' && winner) {
+        const bet = round2(betAmount || 2.0);
+        const winnerTarget = winner === 'H' ? 'admin' : 'user';
+        const loserTarget = winner === 'H' ? 'user' : 'admin';
+        const winnerLabel = winner === 'H' ? 'Darsh' : 'Dora';
+        const loserLabel = winner === 'H' ? 'Dora' : 'Darsh';
+
+        const winEntry = {
+          id: `game_win_${Date.now()}_${winnerTarget}`,
+          sl: 1,
+          target: winnerTarget,
+          description: `[${winnerLabel}] 🏆 Won Couple Tic-Tac-Toe vs ${loserLabel}`,
+          earnedAt: new Date().toLocaleString('en-GB'),
+          expireDate: '',
+          points: bet,
+          type: 'credit',
+          remarks: `Won match pot (Bet: ₹${bet.toFixed(2)})`,
+          status: 'Confirmed'
+        };
+
+        const loseEntry = {
+          id: `game_lose_${Date.now()}_${loserTarget}`,
+          sl: 1,
+          target: loserTarget,
+          description: `[${loserLabel}] 🎲 Couple Tic-Tac-Toe Match Bet`,
+          earnedAt: new Date().toLocaleString('en-GB'),
+          expireDate: '',
+          points: -bet,
+          type: 'debit',
+          remarks: `Match bet lost to ${winnerLabel}`,
+          status: 'Deducted'
+        };
+
+        globalLoveBalanceState.loveLedger = sanitizeLedger([winEntry, loseEntry, ...(globalLoveBalanceState.loveLedger || [])]);
+        syncBalancesFromLedger();
+        persistLoveState();
+        syncActiveDoraUserBalance();
+
+        io.emit('love_balance_broadcast', {
+          action: 'TRANSACTION',
+          loveLedger: globalLoveBalanceState.loveLedger,
+          currentLoveBalance: globalLoveBalanceState.loveBalance,
+          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          serverTimestamp: Date.now()
+        });
+      }
+
+      // Relay move to partner in real time
+      socket.broadcast.emit('couple_game_broadcast', gameData);
+    } catch (err) {
+      console.error('Error in couple_game_action:', err);
+    }
+  });
+
   socket.on('request_peer_balance', (data) => {
     socket.broadcast.emit('request_peer_balance', data || {});
   });
@@ -1714,6 +1804,14 @@ io.on('connection', (socket) => {
   // --- REAL-TIME LOVE BALANCE & WISHES SYNC ---
   socket.on('love_balance_action', (data) => {
     if (!data) return;
+
+    // Security Gate: Manual adjust, set exact, clear ledger require Darsh/Admin authentication
+    const adminRestrictedActions = ['CLEAR_LEDGER', 'SET_EXACT_BALANCE', 'MANUAL_ADJUSTMENT'];
+    if (adminRestrictedActions.includes(data.action) && !isSocketAdmin(socket, data)) {
+      console.warn('Unauthorized admin action attempt blocked:', data.action, 'from role:', socket.role);
+      socket.emit('love_balance_error', { message: 'Access Denied: Only Admin (Darsh) can perform this action' });
+      return;
+    }
 
     if (data.action === 'CLEAR_LEDGER') {
       const target = data.target || 'user';
@@ -2036,7 +2134,7 @@ io.on('connection', (socket) => {
   socket.on('daily_task_request_sync', async ({ date }) => {
     try {
       evaluateRoutineAndHabitInfractions();
-      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetDate = date || getISTDateString();
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
       let slots = (memoryDailySlots || []).filter(s => s && !activeDeleted.includes(s.id));
       let submissions = [...memoryDailySubmissions];
@@ -2085,7 +2183,7 @@ io.on('connection', (socket) => {
       const { date, slotId, note, image, userRole, slotTitle } = data || {};
       if (userRole === 'parent') return; // Tasks are strictly for Dora to submit; Darsh only reviews & approves
       if (!slotId) return;
-      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetDate = date || getISTDateString();
       const submissionId = 'sub_' + targetDate + '_' + slotId;
 
       const submissionData = {
@@ -2139,6 +2237,11 @@ io.on('connection', (socket) => {
 
   socket.on('daily_task_approve', async (payload) => {
     try {
+      if (!isSocketAdmin(socket, payload)) {
+        console.warn('Unauthorized daily_task_approve blocked from socket:', socket.id, socket.role);
+        socket.emit('love_balance_error', { message: 'Access Denied: Only Admin (Darsh) can approve routine tasks' });
+        return;
+      }
       const { submissionId, slotId, date, feedback, slotTitle } = payload || {};
       if (!submissionId && !slotId) return;
       const pts = parseFloat(payload?.points ?? payload?.pointsAwarded) || 2.0;
@@ -2169,9 +2272,9 @@ io.on('connection', (socket) => {
 
       if (!updatedSubmission) {
         updatedSubmission = {
-          id: submissionId || `sub_${date || new Date().toISOString().split('T')[0]}_${slotId}`,
+          id: submissionId || `sub_${date || getISTDateString()}_${slotId}`,
           slotId: slotId || '',
-          date: date || new Date().toISOString().split('T')[0],
+          date: date || getISTDateString(),
           status: 'APPROVED',
           pointsAwarded: pts,
           reviewedAt: new Date(),
@@ -2182,7 +2285,7 @@ io.on('connection', (socket) => {
 
       // Award Love Balance points to Dora (deduplicated strictly by approval ID)
       if (pts > 0) {
-        const targetDate = date || (updatedSubmission && updatedSubmission.date) || new Date().toISOString().split('T')[0];
+        const targetDate = date || (updatedSubmission && updatedSubmission.date) || getISTDateString();
         const approvalEntryId = 'lb_appr_' + (submissionId || `${targetDate}_${slotId}`);
         const taskName = slotTitle || (updatedSubmission && updatedSubmission.slotTitle) || 'Daily Routine Task';
         const missedDebitId = `habit_routine_${slotId}_${targetDate}_user`;
@@ -2251,8 +2354,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('daily_task_reject', async ({ submissionId, feedback }) => {
+  socket.on('daily_task_reject', async (payload) => {
     try {
+      if (!isSocketAdmin(socket, payload)) {
+        console.warn('Unauthorized daily_task_reject attempt blocked from socket:', socket.id);
+        socket.emit('love_balance_error', { message: 'Access Denied: Only Admin (Darsh) can reject routine tasks' });
+        return;
+      }
+      const { submissionId, feedback } = payload || {};
       if (!submissionId) return;
       let updatedSubmission = null;
 
@@ -2288,6 +2397,10 @@ io.on('connection', (socket) => {
 
   socket.on('daily_slot_create', async (slotData) => {
     try {
+      if (!isSocketAdmin(socket, slotData)) {
+        console.warn('Unauthorized daily_slot_create attempt blocked');
+        return;
+      }
       const newSlot = {
         id: slotData.id || ('slot_' + Date.now()),
         title: slotData.title || 'New Routine Task',
@@ -2313,8 +2426,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('daily_slot_update', async ({ slotId, updates }) => {
+  socket.on('daily_slot_update', async (data) => {
     try {
+      if (!isSocketAdmin(socket, data)) {
+        console.warn('Unauthorized daily_slot_update attempt blocked');
+        return;
+      }
+      const { slotId, updates } = data || {};
       if (!slotId) return;
       const idx = memoryDailySlots.findIndex(s => s.id === slotId);
       if (idx >= 0) {
@@ -2331,8 +2449,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('daily_slot_delete', async ({ slotId, deletedSlotIds }) => {
+  socket.on('daily_slot_delete', async (data) => {
     try {
+      if (!isSocketAdmin(socket, data)) {
+        console.warn('Unauthorized daily_slot_delete attempt blocked');
+        return;
+      }
+      const { slotId, deletedSlotIds } = data || {};
       if (!slotId) return;
       const allDeleted = Array.from(new Set([
         ...(globalLoveBalanceState.deletedSlotIds || []),
@@ -2486,6 +2609,15 @@ io.on('connection', (socket) => {
       if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
         const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
         if (diffMs <= 5 * 60 * 1000) {
+          if (!globalLoveBalanceState.rewardedTurnMsgIds) {
+            globalLoveBalanceState.rewardedTurnMsgIds = [];
+          }
+          const turnKey = `${lastCounterpartMsg._id}_${targetUser}`;
+          if (globalLoveBalanceState.rewardedTurnMsgIds.includes(turnKey)) {
+            // Turn already rewarded; avoid duplicate spam rewards in the same reply window
+            return;
+          }
+
           // Check 5-minute cooldown per target user to prevent spam
           const existingInstant = (globalLoveBalanceState.loveLedger || []).find(e => 
             e && e.target === targetUser && e.type === 'credit' && (e.description || '').includes('Instant Reply')
@@ -2494,6 +2626,11 @@ io.on('connection', (socket) => {
           const cooldownPassed = !existingInstant || isNaN(lastInstantTime) || (Date.now() - lastInstantTime >= 4 * 60 * 1000);
 
           if (cooldownPassed) {
+            globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
+            if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
+              globalLoveBalanceState.rewardedTurnMsgIds.shift();
+            }
+
             const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
             const nowStr = new Date().toLocaleString('en-GB');
             const expDate = new Date();
