@@ -327,8 +327,11 @@ const messageSchema = new mongoose.Schema({
   flaggedPending: { type: Boolean, default: false },
   isSeen: { type: Boolean, default: false },
   isMedia: { type: Boolean, default: false },
+  mediaType: { type: String, default: 'text' },
   mediaOpened: { type: Boolean, default: false },
   reaction: { type: String, default: null },
+  isPinned: { type: Boolean, default: false },
+  isStarred: { type: Boolean, default: false },
   replyRefId: { type: String, default: null }
 });
 
@@ -2656,8 +2659,11 @@ io.on('connection', (socket) => {
       flaggedPending: false,
       isSeen: false,
       isMedia: Boolean(isMedia),
+      mediaType: data.mediaType || (Boolean(isMedia) ? 'photo' : 'text'),
       mediaOpened: false,
       reaction: null,
+      isPinned: Boolean(data.isPinned),
+      isStarred: Boolean(data.isStarred),
       replyRefId: replyRefId || null
     };
 
@@ -2803,7 +2809,36 @@ io.on('connection', (socket) => {
   });
 
   socket.on('add_reaction', async ({ room, messageId, reaction }) => {
+    const msg = memoryMessages.find(m => m && m._id === messageId);
+    if (msg) msg.reaction = reaction;
     io.to(room).emit('update_message_reaction', { messageId, reaction });
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await Message.updateOne({ _id: messageId }, { $set: { reaction } });
+      }
+    } catch (e) {}
+  });
+
+  socket.on('pin_stealth_msg', async ({ room, messageId, isPinned }) => {
+    const msg = memoryMessages.find(m => m && m._id === messageId);
+    if (msg) msg.isPinned = isPinned;
+    io.to(room).emit('update_message_pinned', { messageId, isPinned });
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await Message.updateOne({ _id: messageId }, { $set: { isPinned } });
+      }
+    } catch (e) {}
+  });
+
+  socket.on('star_stealth_msg', async ({ room, messageId, isStarred }) => {
+    const msg = memoryMessages.find(m => m && m._id === messageId);
+    if (msg) msg.isStarred = isStarred;
+    io.to(room).emit('update_message_starred', { messageId, isStarred });
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await Message.updateOne({ _id: messageId }, { $set: { isStarred } });
+      }
+    } catch (e) {}
   });
 
   socket.on('toggle_pending', async ({ messageId, status, room }) => {
