@@ -1173,7 +1173,9 @@ function broadcastPresence(room) {
   const onlineEmails = new Set();
   const now = Date.now();
   for (const [sId, info] of activeRoomUsers.entries()) {
-    if (info.isForeground !== false && (now - (info.lastHeartbeat || now)) < 25000) {
+    const liveSocket = io.sockets.sockets.get(sId);
+    const isLive = liveSocket && liveSocket.connected;
+    if (isLive || (now - (info.lastHeartbeat || now)) < 60000) {
       if (info.role) onlineRoles.add(info.role);
       if (info.email) onlineEmails.add(info.email);
     }
@@ -1484,9 +1486,14 @@ setInterval(() => {
   const now = Date.now();
   let changed = false;
   for (const [sId, info] of activeRoomUsers.entries()) {
-    if (now - (info.lastHeartbeat || now) > 25000) {
-      activeRoomUsers.delete(sId);
-      changed = true;
+    const liveSocket = io.sockets.sockets.get(sId);
+    if (!liveSocket || !liveSocket.connected) {
+      if (now - (info.lastHeartbeat || now) > 60000) {
+        activeRoomUsers.delete(sId);
+        changed = true;
+      }
+    } else {
+      info.lastHeartbeat = now;
     }
   }
   if (changed) {
