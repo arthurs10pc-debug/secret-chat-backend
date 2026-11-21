@@ -371,21 +371,96 @@ const DEFAULT_DAILY_SLOTS = [
   { id: 'slot_1', title: 'Morning Workout (10 Squats / Stretch)', timeRange: '08:00 - 09:00', tag: 'Workout', rewardPoints: 2.0, order: 1, isActive: true },
   { id: 'slot_2', title: 'Healthy Detox Juice / Morning Drink', timeRange: '09:00 - 10:00', tag: 'Juice', rewardPoints: 1.5, order: 2, isActive: true },
   { id: 'slot_3', title: 'Heavy Breakfast (High-Calorie Meal Plate)', timeRange: '10:00 - 11:00', tag: 'Breakfast', rewardPoints: 2.5, order: 3, isActive: true },
-  { id: 'slot_4', title: 'Lunch Check-in & Care Update', timeRange: '01:00 - 02:00', tag: 'Lunch', rewardPoints: 2.0, order: 4, isActive: true },
-  { id: 'slot_5', title: 'Hydration Milestone (Water Intake)', timeRange: '03:30 - 04:30', tag: 'Water', rewardPoints: 1.0, order: 5, isActive: true },
-  { id: 'slot_6', title: 'Evening Tea & Healthy Snack', timeRange: '05:00 - 05:30', tag: 'Tea', rewardPoints: 1.0, order: 6, isActive: true },
-  { id: 'slot_7', title: 'High-Protein Dinner Plate', timeRange: '08:30 - 09:30', tag: 'Dinner', rewardPoints: 2.0, order: 7, isActive: true },
-  { id: 'slot_8', title: 'Google Fit 8,000 Steps Screenshot', timeRange: '10:00 - 10:30', tag: 'Steps', rewardPoints: 3.0, order: 8, isActive: true },
-  { id: 'slot_9', title: 'Night Skin Care Routine & Glow Check', timeRange: '10:30 - 11:00', tag: 'Skincare', rewardPoints: 2.0, order: 9, isActive: true }
+  { id: 'slot_4', title: 'Lunch Check-in & Care Update', timeRange: '13:00 - 14:00', tag: 'Lunch', rewardPoints: 2.0, order: 4, isActive: true },
+  { id: 'slot_5', title: 'Hydration Milestone (Water Intake)', timeRange: '15:30 - 16:30', tag: 'Water', rewardPoints: 1.0, order: 5, isActive: true },
+  { id: 'slot_6', title: 'Evening Tea & Healthy Snack', timeRange: '17:00 - 17:30', tag: 'Tea', rewardPoints: 1.0, order: 6, isActive: true },
+  { id: 'slot_7', title: 'High-Protein Dinner Plate', timeRange: '20:30 - 21:30', tag: 'Dinner', rewardPoints: 2.0, order: 7, isActive: true },
+  { id: 'slot_8', title: 'Google Fit 8,000 Steps Screenshot', timeRange: '22:00 - 22:30', tag: 'Steps', rewardPoints: 3.0, order: 8, isActive: true },
+  { id: 'slot_9', title: 'Night Skin Care Routine & Glow Check', timeRange: '22:30 - 23:00', tag: 'Skincare', rewardPoints: 2.0, order: 9, isActive: true }
 ];
 
-let memoryDailySlots = [...DEFAULT_DAILY_SLOTS];
+const normalizeSlotTimeRange = (slot) => {
+  if (!slot || !slot.timeRange) return slot;
+  let tr = String(slot.timeRange).trim();
+  const lower = ((slot.tag || '') + ' ' + (slot.title || '')).toLowerCase();
+
+  if (lower.includes('dinner') && /^0?8:30\s*-\s*0?9:30/i.test(tr)) {
+    tr = '20:30 - 21:30';
+  } else if (lower.includes('steps') && /^10:00\s*-\s*10:30/i.test(tr)) {
+    tr = '22:00 - 22:30';
+  } else if ((lower.includes('night') || lower.includes('skincare')) && /^10:30\s*-\s*11:00/i.test(tr)) {
+    tr = '22:30 - 23:00';
+  } else if ((lower.includes('lunch') || lower.includes('tifin') || lower.includes('tiffin')) && /^0?1:00\s*-\s*0?2:00/i.test(tr)) {
+    tr = '13:00 - 14:00';
+  } else if (lower.includes('water') && /^0?3:30\s*-\s*0?4:30/i.test(tr)) {
+    tr = '15:30 - 16:30';
+  } else if (lower.includes('tea') && /^0?5:00\s*-\s*0?5:30/i.test(tr)) {
+    tr = '17:00 - 17:30';
+  }
+
+  return { ...slot, timeRange: tr };
+};
+
+const getSlotTimeSortMinutes = (slot) => {
+  if (!slot || !slot.timeRange) return 9999;
+  try {
+    const rawStart = String(slot.timeRange).split('-')[0].trim();
+    const isPm = /pm/i.test(slot.timeRange) || /pm/i.test(rawStart);
+    const isAm = /am/i.test(slot.timeRange) || /am/i.test(rawStart);
+
+    const m = rawStart.match(/(\d{1,2}):(\d{2})/);
+    if (!m) return 9999;
+    let h = parseInt(m[1], 10);
+    const mins = parseInt(m[2], 10);
+
+    if (isPm && h < 12) h += 12;
+    if (isAm && h === 12) h = 0;
+
+    if (!isPm && !isAm) {
+      const lower = ((slot.tag || '') + ' ' + (slot.title || '')).toLowerCase();
+      if (lower.includes('dinner') && h < 12) {
+        h += 12;
+      } else if ((lower.includes('night') || lower.includes('skincare') || lower.includes('steps')) && h < 12) {
+        h += 12;
+      } else if (lower.includes('tea') && h < 12 && h <= 8) {
+        h += 12;
+      } else if ((lower.includes('lunch') || lower.includes('tifin') || lower.includes('tiffin')) && h < 12 && h <= 5) {
+        h += 12;
+      }
+    }
+
+    return h * 60 + mins;
+  } catch {
+    return 9999;
+  }
+};
+
+const sortSlotsByTime = (slots) => {
+  if (!Array.isArray(slots)) return [];
+  return slots
+    .map(normalizeSlotTimeRange)
+    .sort((a, b) => {
+      const diff = getSlotTimeSortMinutes(a) - getSlotTimeSortMinutes(b);
+      if (diff !== 0) return diff;
+      return (a.order || 0) - (b.order || 0);
+    });
+};
+
+let memoryDailySlots = sortSlotsByTime([...DEFAULT_DAILY_SLOTS]);
 let memoryDailySubmissions = [];
 
 async function seedDefaultSlotsIfEmpty() {
   try {
     const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
     if (mongoose.connection.readyState === 1) {
+      // Migrate any legacy 12hr slot timeRanges to standard 24hr format
+      await DailyTaskSlot.updateMany({ id: 'slot_4', timeRange: '01:00 - 02:00' }, { $set: { timeRange: '13:00 - 14:00' } }).catch(() => {});
+      await DailyTaskSlot.updateMany({ id: 'slot_5', timeRange: '03:30 - 04:30' }, { $set: { timeRange: '15:30 - 16:30' } }).catch(() => {});
+      await DailyTaskSlot.updateMany({ id: 'slot_6', timeRange: '05:00 - 05:30' }, { $set: { timeRange: '17:00 - 17:30' } }).catch(() => {});
+      await DailyTaskSlot.updateMany({ id: 'slot_7', timeRange: '08:30 - 09:30' }, { $set: { timeRange: '20:30 - 21:30' } }).catch(() => {});
+      await DailyTaskSlot.updateMany({ id: 'slot_8', timeRange: '10:00 - 10:30' }, { $set: { timeRange: '22:00 - 22:30' } }).catch(() => {});
+      await DailyTaskSlot.updateMany({ id: 'slot_9', timeRange: '10:30 - 11:00' }, { $set: { timeRange: '22:30 - 23:00' } }).catch(() => {});
+
       const existingCount = await DailyTaskSlot.countDocuments().catch(() => 0);
       if (existingCount === 0) {
         for (const slot of DEFAULT_DAILY_SLOTS) {
@@ -400,10 +475,10 @@ async function seedDefaultSlotsIfEmpty() {
         console.log('Seeded initial default daily task slots.');
       }
       // Always hydrate memoryDailySlots from MongoDB so custom slots are never lost
-      const dbSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).sort({ order: 1, createdAt: 1 }).lean();
+      const dbSlots = await DailyTaskSlot.find({ id: { $nin: activeDeleted } }).lean();
       if (Array.isArray(dbSlots) && dbSlots.length > 0) {
-        memoryDailySlots = dbSlots;
-        globalLoveBalanceState.dailySlots = dbSlots;
+        memoryDailySlots = sortSlotsByTime(dbSlots);
+        globalLoveBalanceState.dailySlots = memoryDailySlots;
         return;
       }
     }
@@ -414,9 +489,9 @@ async function seedDefaultSlotsIfEmpty() {
     if (Array.isArray(globalLoveBalanceState.dailySlots)) {
       globalLoveBalanceState.dailySlots.filter(s => s && s.id && !activeDeleted.includes(s.id)).forEach(s => map.set(s.id, s));
     }
-    memoryDailySlots = Array.from(map.values())
-      .filter(s => s && !activeDeleted.includes(s.id))
-      .sort((a, b) => (a.order || 0) - (b.order || 0));
+    memoryDailySlots = sortSlotsByTime(
+      Array.from(map.values()).filter(s => s && !activeDeleted.includes(s.id))
+    );
     globalLoveBalanceState.dailySlots = memoryDailySlots;
   } catch (err) {
     console.warn('Error seeding default daily slots:', err);
@@ -980,7 +1055,7 @@ app.get('/api/daily-tasks/sync', async (req, res) => {
         memoryDailySlots = dbSlots;
       }
     }
-    const cleanSlots = slots.filter(s => s && !activeDeleted.includes(s.id)).sort((a, b) => (a.order || 0) - (b.order || 0));
+    const cleanSlots = sortSlotsByTime(slots.filter(s => s && !activeDeleted.includes(s.id)));
 
     let submissions = memoryDailySubmissions;
     if (mongoose.connection.readyState === 1) {
@@ -1535,7 +1610,7 @@ setInterval(() => {
   const mapSlots = new Map();
   DEFAULT_DAILY_SLOTS.filter(d => !activeDeleted.includes(d.id)).forEach(d => mapSlots.set(d.id, d));
   (memoryDailySlots || []).filter(s => s && s.id && !activeDeleted.includes(s.id)).forEach(s => mapSlots.set(s.id, s));
-  const broadcastSlots = Array.from(mapSlots.values()).sort((a, b) => (a.order || 0) - (b.order || 0));
+  const broadcastSlots = sortSlotsByTime(Array.from(mapSlots.values()));
   memoryDailySlots = broadcastSlots;
 
   io.emit('love_balance_heartbeat_sync', {
@@ -1624,7 +1699,7 @@ io.on('connection', (socket) => {
     const mapSlots = new Map();
     DEFAULT_DAILY_SLOTS.filter(d => !activeDeleted.includes(d.id)).forEach(d => mapSlots.set(d.id, d));
     (memoryDailySlots || []).filter(s => s && s.id && !activeDeleted.includes(s.id)).forEach(s => mapSlots.set(s.id, s));
-    const activeSlots = Array.from(mapSlots.values()).sort((a, b) => (a.order || 0) - (b.order || 0));
+    const activeSlots = sortSlotsByTime(Array.from(mapSlots.values()));
     memoryDailySlots = activeSlots;
 
     socket.emit('love_balance_broadcast', {
@@ -2528,6 +2603,7 @@ io.on('connection', (socket) => {
       globalLoveBalanceState.deletedSlotIds = (globalLoveBalanceState.deletedSlotIds || []).filter(id => id !== newSlot.id);
       const exists = memoryDailySlots.some(s => s.id === newSlot.id);
       if (!exists) memoryDailySlots.push(newSlot);
+      memoryDailySlots = sortSlotsByTime(memoryDailySlots);
       globalLoveBalanceState.dailySlots = memoryDailySlots;
       persistLoveState();
 
@@ -2552,6 +2628,7 @@ io.on('connection', (socket) => {
       if (idx >= 0) {
         memoryDailySlots[idx] = { ...memoryDailySlots[idx], ...updates };
       }
+      memoryDailySlots = sortSlotsByTime(memoryDailySlots);
       globalLoveBalanceState.dailySlots = memoryDailySlots;
       persistLoveState();
       if (mongoose.connection.readyState === 1) {
