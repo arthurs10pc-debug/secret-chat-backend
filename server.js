@@ -479,6 +479,23 @@ app.get('/api/yt-search', async (req, res) => {
   res.json({ videoId: null, title: query });
 });
 
+// Full authoritative chat history API for instant full export and complete sync
+app.get('/api/chat-history', async (req, res) => {
+  const room = req.query.room || 'stealth_master_room';
+  try {
+    let history = [];
+    if (mongoose.connection.readyState === 1) {
+      history = await Message.find({ room }).sort({ timestamp: 1 }).lean();
+    } else {
+      history = memoryMessages.filter(m => m.room === room);
+    }
+    res.json(history);
+  } catch (err) {
+    console.error("Error fetching chat-history:", err);
+    res.json(memoryMessages.filter(m => m.room === room));
+  }
+});
+
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   name: { type: String, default: '' },
@@ -2656,6 +2673,17 @@ io.on('connection', (socket) => {
     const plainText = decryptText(encryptedText);
     const msgTimestamp = new Date();
 
+    const counterpartRole = (role === 'user' || role === 'A') ? 'parent' : 'user';
+    let isCounterpartOnline = false;
+    for (const [sId, info] of activeRoomUsers.entries()) {
+      const liveSocket = io.sockets.sockets.get(sId);
+      const isLive = liveSocket && liveSocket.connected;
+      if (isLive && info && (info.role === counterpartRole || (counterpartRole === 'parent' && info.role === 'admin'))) {
+        isCounterpartOnline = true;
+        break;
+      }
+    }
+
     const newMsgData = {
       _id: new mongoose.Types.ObjectId().toString(),
       room,
@@ -2665,6 +2693,7 @@ io.on('connection', (socket) => {
       timestamp: msgTimestamp,
       flaggedPending: false,
       isSeen: false,
+      isDelivered: isCounterpartOnline,
       isMedia: Boolean(isMedia),
       mediaType: data.mediaType || (Boolean(isMedia) ? 'photo' : 'text'),
       mediaOpened: false,
@@ -2677,7 +2706,9 @@ io.on('connection', (socket) => {
     // Always push to in-memory messages for instant real-time parity
     memoryMessages.push(newMsgData);
 
-    io.to(room).emit('receive_stealth_msg', newMsgData);
+    const targetRoom = room || 'stealth_master_room';
+    io.to(targetRoom).emit('receive_stealth_msg', newMsgData);
+    io.emit('receive_stealth_msg', newMsgData);
 
     try {
       if (mongoose.connection.readyState === 1) {
@@ -2793,16 +2824,19 @@ io.on('connection', (socket) => {
   });
 
   socket.on('mark_seen', async ({ room, viewerRole }) => {
-    io.to(room).emit('messages_marked_seen', { viewerRole });
+    const targetRoom = room || 'stealth_master_room';
+    io.to(targetRoom).emit('messages_marked_seen', { viewerRole });
+    io.emit('messages_marked_seen', { viewerRole });
     memoryMessages.forEach(m => {
-      if (m.room === room && m.senderRole !== viewerRole) {
+      if ((!room || m.room === targetRoom) && m.senderRole !== viewerRole) {
         m.isSeen = true;
+        m.isDelivered = true;
       }
     });
     if (mongoose.connection.readyState === 1) {
       Message.updateMany(
-        { room, senderRole: { $ne: viewerRole }, isSeen: false },
-        { $set: { isSeen: true } }
+        { room: targetRoom, senderRole: { $ne: viewerRole }, isSeen: false },
+        { $set: { isSeen: true, isDelivered: true } }
       ).catch(console.error);
     }
   });
