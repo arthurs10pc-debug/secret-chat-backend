@@ -1277,15 +1277,16 @@ function evaluateRoutineAndHabitInfractions() {
       });
     };
 
-    const addHabitEntry = (id, target, type, amount, description, remarks, dateStr, exactSlotId) => {
+    const addHabitEntry = (id, target, type, amount, description, remarks, dateStr, exactSlotId, explicitTime) => {
       if (hasEntry(id, target, dateStr, exactSlotId, type)) return;
       const targetLabel = target === 'user' ? 'Dora' : 'Darsh';
+      const timePart = explicitTime || '10:00 am';
       const newEntry = {
         id,
         sl: 1,
         target,
         description: `[${targetLabel}] ${description}`,
-        earnedAt: `${dateStr}, 12:00 pm`,
+        earnedAt: `${dateStr}, ${timePart}`,
         expireDate: '',
         points: type === 'credit' ? Math.abs(amount) : -Math.abs(amount),
         type,
@@ -1321,11 +1322,11 @@ function evaluateRoutineAndHabitInfractions() {
         });
         if (hadDoraMorning) {
           if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'credit')) {
-            addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
+            addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
           }
         } else {
           if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'debit')) {
-            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr);
+            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr, 'Morning', '09:00 am');
           }
         }
 
@@ -1341,7 +1342,7 @@ function evaluateRoutineAndHabitInfractions() {
         });
         if (hadDarshMorning) {
           if (!hasEntry(darshMId, 'admin', dayStr, 'Morning', 'credit')) {
-            addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr);
+            addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
           }
         }
       }
@@ -1362,11 +1363,11 @@ function evaluateRoutineAndHabitInfractions() {
         });
         if (hadDoraNight) {
           if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'credit')) {
-            addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
+            addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
           }
         } else {
           if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'debit')) {
-            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr);
+            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr, 'Good Night', '11:00 pm');
           }
         }
 
@@ -1384,7 +1385,7 @@ function evaluateRoutineAndHabitInfractions() {
         });
         if (hadDarshNight) {
           if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night', 'credit')) {
-            addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr);
+            addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
           }
         }
       }
@@ -1424,7 +1425,8 @@ function evaluateRoutineAndHabitInfractions() {
               `Missed Routine Task: ${slot.title} (${dayStr})`,
               `Missed Routine Task Deadline (${slot.timeRange})`,
               dayStr,
-              slot.id
+              slot.id,
+              slot.timeRange || '10:30 am'
             );
           }
         }
