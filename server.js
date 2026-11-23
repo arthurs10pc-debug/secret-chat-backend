@@ -348,6 +348,7 @@ mongoose.connect(MONGO_URI)
         }
         if (Array.isArray(doc.dailySlots) && doc.dailySlots.length > 0) {
           globalLoveBalanceState.dailySlots = doc.dailySlots.filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
+          memoryDailySlots = sortSlotsByTime(globalLoveBalanceState.dailySlots);
         }
         if (doc.activeDoraEmail && doc.activeDoraEmail.toLowerCase() !== 'dora@gmail.com') {
           globalLoveBalanceState.activeDoraEmail = doc.activeDoraEmail;
@@ -479,7 +480,7 @@ dailyTaskSubmissionSchema.index({ date: 1, slotId: 1 });
 const DailyTaskSubmission = mongoose.model('DailyTaskSubmission', dailyTaskSubmissionSchema);
 
 const DEFAULT_DAILY_SLOTS = [
-  { id: 'slot_1', title: 'Morning Workout (10 Squats / Stretch)', timeRange: '08:00 - 09:00', tag: 'Workout', rewardPoints: 2.0, order: 1, isActive: true },
+  { id: 'slot_1', title: 'Morning Workout (10 Squats / Stretch)', timeRange: '07:00 - 08:00', tag: 'Workout', rewardPoints: 2.0, order: 1, isActive: true },
   { id: 'slot_2', title: 'Healthy Detox Juice / Morning Drink', timeRange: '09:00 - 10:00', tag: 'Juice', rewardPoints: 1.5, order: 2, isActive: true },
   { id: 'slot_3', title: 'Heavy Breakfast (High-Calorie Meal Plate)', timeRange: '10:00 - 11:00', tag: 'Breakfast', rewardPoints: 2.5, order: 3, isActive: true },
   { id: 'slot_4', title: 'Lunch Check-in & Care Update', timeRange: '13:00 - 14:00', tag: 'Lunch', rewardPoints: 2.0, order: 4, isActive: true },
@@ -565,6 +566,7 @@ async function seedDefaultSlotsIfEmpty() {
     const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
     if (mongoose.connection.readyState === 1) {
       // Migrate any legacy 12hr slot timeRanges to standard 24hr format
+      await DailyTaskSlot.updateMany({ id: 'slot_1', timeRange: '08:00 - 09:00' }, { $set: { timeRange: '07:00 - 08:00' } }).catch(() => {});
       await DailyTaskSlot.updateMany({ id: 'slot_4', timeRange: '01:00 - 02:00' }, { $set: { timeRange: '13:00 - 14:00' } }).catch(() => {});
       await DailyTaskSlot.updateMany({ id: 'slot_5', timeRange: '03:30 - 04:30' }, { $set: { timeRange: '15:30 - 16:30' } }).catch(() => {});
       await DailyTaskSlot.updateMany({ id: 'slot_6', timeRange: '05:00 - 05:30' }, { $set: { timeRange: '17:00 - 17:30' } }).catch(() => {});
@@ -2758,7 +2760,7 @@ io.on('connection', (socket) => {
         globalLoveBalanceState.dailySlots = memoryDailySlots;
         persistLoveState();
         if (mongoose.connection.readyState === 1) {
-          DailyTaskSlot.findOneAndUpdate({ id: data.slotId }, data.updates).catch(() => {});
+          DailyTaskSlot.findOneAndUpdate({ id: data.slotId }, data.updates, { upsert: true, new: true }).catch(() => {});
         }
       }
       io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
@@ -3175,7 +3177,7 @@ io.on('connection', (socket) => {
       globalLoveBalanceState.dailySlots = memoryDailySlots;
       persistLoveState();
       if (mongoose.connection.readyState === 1) {
-        DailyTaskSlot.findOneAndUpdate({ id: slotId }, updates, { new: true }).catch(() => {});
+        DailyTaskSlot.findOneAndUpdate({ id: slotId }, updates, { upsert: true, new: true }).catch(() => {});
       }
       io.emit('daily_slots_updated', { slots: memoryDailySlots, deletedSlotIds: globalLoveBalanceState.deletedSlotIds });
     } catch (err) {
