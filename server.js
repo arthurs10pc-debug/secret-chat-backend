@@ -191,10 +191,11 @@ function sanitizeLedger(ledger) {
       item.earnedAt = `${dateStr}, ${timeStr}`;
     }
 
-    // Deduplicate rapid "Instant Reply" spam entries (allow at most 1 per 60 minutes per target)
+    // Update Instant Reply points to 0.50
     if (item.description && item.description.includes('Instant Reply')) {
       item.description = item.description.replace(/Within (?:5|1) Mins?/gi, 'Within 30 Sec');
       if (item.remarks) item.remarks = item.remarks.replace(/Within (?:5|1) Mins?/gi, 'Within 30 Sec');
+      item.points = 0.50;
       const targetKey = item.target || 'user';
       let entryTimeMs = 0;
       if (item.id && item.id.startsWith('lb_instant_')) {
@@ -221,6 +222,11 @@ function sanitizeLedger(ledger) {
           lastInstantReplyMap[targetKey] = entryTimeMs;
         }
       }
+    }
+
+    // Update Deep Romantic Long Message points to 1.00
+    if (item.description && (item.description.includes('Deep Romantic Long Message') || item.description.includes('Romantic Paragraph'))) {
+      item.points = 1.00;
     }
 
     item.points = round2(item.points);
