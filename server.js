@@ -159,8 +159,8 @@ function sanitizeLedger(ledger) {
 
     // Deduplicate rapid "Instant Reply" spam entries (allow at most 1 per 60 minutes per target)
     if (item.description && item.description.includes('Instant Reply')) {
-      item.description = item.description.replace(/Within 5 Mins?/gi, 'Within 1 Min');
-      if (item.remarks) item.remarks = item.remarks.replace(/Within 5 Mins?/gi, 'Within 1 Min');
+      item.description = item.description.replace(/Within (?:5|1) Mins?/gi, 'Within 30 Sec');
+      if (item.remarks) item.remarks = item.remarks.replace(/Within (?:5|1) Mins?/gi, 'Within 30 Sec');
       const targetKey = item.target || 'user';
       let entryTimeMs = 0;
       if (item.id && item.id.startsWith('lb_instant_')) {
@@ -2933,8 +2933,8 @@ io.on('connection', (socket) => {
 
       if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
         const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
-        // Award instant reply ONLY if replied within 1 minute (60 seconds)
-        if (diffMs <= 60 * 1000) {
+        // Award instant reply ONLY if replied within 30 seconds (0.75 points)
+        if (diffMs <= 30 * 1000) {
           if (!globalLoveBalanceState.rewardedTurnMsgIds) {
             globalLoveBalanceState.rewardedTurnMsgIds = [];
           }
@@ -2970,12 +2970,12 @@ io.on('connection', (socket) => {
             id: replyTxId,
             sl: 1,
             target: targetUser,
-            description: `[${targetLabel}] Instant Reply (Within 1 Min)`,
+            description: `[${targetLabel}] Instant Reply (Within 30 Sec)`,
             earnedAt: nowStr,
             expireDate: expStr,
-            points: 1.00,
+            points: 0.75,
             type: 'credit',
-            remarks: 'Instant Reply (Within 1 Min)',
+            remarks: 'Instant Reply (Within 30 Sec)',
             status: 'Confirmed'
           };
 
@@ -2989,9 +2989,9 @@ io.on('connection', (socket) => {
             io.emit('love_balance_broadcast', {
               action: 'TRANSACTION',
               target: targetUser,
-              amount: 1.00,
+              amount: 0.75,
               type: 'credit',
-              reason: 'Instant Reply (Within 1 Min)',
+              reason: 'Instant Reply (Within 30 Sec)',
               newEntry: replyEntry,
               loveLedger: globalLoveBalanceState.loveLedger,
               currentLoveBalance: globalLoveBalanceState.loveBalance,
