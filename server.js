@@ -116,9 +116,43 @@ function isSocketAdmin(socket, data = {}) {
   return role === 'parent' || role === 'admin' || email === 'arthurs10pc@gmail.com';
 }
 
+const DARSH_BASE_TX_ID = 'lb_darsh_base_points_71';
+
 function syncBalancesFromLedger() {
+  if (!Array.isArray(globalLoveBalanceState.loveLedger)) {
+    globalLoveBalanceState.loveLedger = [];
+  }
+
+  // Ensure Darsh has his 71.00 base reserve transaction permanently in ledger
+  const hasDarshBase = globalLoveBalanceState.loveLedger.some(e => e && (e.id === DARSH_BASE_TX_ID || (e.target === 'admin' && Number(e.points) >= 71)));
+  if (!hasDarshBase) {
+    const baseEntry = {
+      id: DARSH_BASE_TX_ID,
+      sl: 1,
+      target: 'admin',
+      description: '[Darsh] Love Balance Base Reserve (+71.00)',
+      earnedAt: getNowIstEarnedAt(),
+      expireDate: '',
+      points: 71.00,
+      type: 'credit',
+      remarks: 'Darsh Base Points',
+      status: 'Confirmed'
+    };
+    globalLoveBalanceState.loveLedger = [baseEntry, ...globalLoveBalanceState.loveLedger];
+  }
+
+  // Also remove any accidental scratch card debit mistakenly recorded on Dora
+  globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(e => {
+    if (!e) return false;
+    if (e.target === 'user' && typeof e.description === 'string' && e.description.includes('Opened Surprise Scratch Card')) {
+      return false;
+    }
+    return true;
+  });
+
   globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
-  globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+  const computedAdminBal = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+  globalLoveBalanceState.adminLoveBalance = computedAdminBal > 0 ? computedAdminBal : 71.00;
 }
 
 const SYSTEM_START_DATE = '2026-11-17';
