@@ -2933,7 +2933,7 @@ io.on('connection', (socket) => {
 
       if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
         const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
-        // Award instant reply ONLY if replied within 30 seconds (0.75 points)
+        // Award instant reply ONLY if replied within 30 seconds (0.50 points)
         if (diffMs <= 30 * 1000) {
           if (!globalLoveBalanceState.rewardedTurnMsgIds) {
             globalLoveBalanceState.rewardedTurnMsgIds = [];
@@ -2973,7 +2973,7 @@ io.on('connection', (socket) => {
             description: `[${targetLabel}] Instant Reply (Within 30 Sec)`,
             earnedAt: nowStr,
             expireDate: expStr,
-            points: 0.75,
+            points: 0.50,
             type: 'credit',
             remarks: 'Instant Reply (Within 30 Sec)',
             status: 'Confirmed'
@@ -2989,7 +2989,7 @@ io.on('connection', (socket) => {
             io.emit('love_balance_broadcast', {
               action: 'TRANSACTION',
               target: targetUser,
-              amount: 0.75,
+              amount: 0.50,
               type: 'credit',
               reason: 'Instant Reply (Within 30 Sec)',
               newEntry: replyEntry,
