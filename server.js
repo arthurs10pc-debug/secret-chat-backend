@@ -123,24 +123,6 @@ function syncBalancesFromLedger() {
     globalLoveBalanceState.loveLedger = [];
   }
 
-  // Ensure Darsh has his 71.00 base reserve transaction permanently in ledger
-  const hasDarshBase = globalLoveBalanceState.loveLedger.some(e => e && (e.id === DARSH_BASE_TX_ID || (e.target === 'admin' && Number(e.points) >= 71)));
-  if (!hasDarshBase) {
-    const baseEntry = {
-      id: DARSH_BASE_TX_ID,
-      sl: 1,
-      target: 'admin',
-      description: '[Darsh] Love Balance Base Reserve (+71.00)',
-      earnedAt: getNowIstEarnedAt(),
-      expireDate: '',
-      points: 71.00,
-      type: 'credit',
-      remarks: 'Darsh Base Points',
-      status: 'Confirmed'
-    };
-    globalLoveBalanceState.loveLedger = [baseEntry, ...globalLoveBalanceState.loveLedger];
-  }
-
   // Also remove any accidental scratch card debit mistakenly recorded on Dora
   globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(e => {
     if (!e) return false;
@@ -151,8 +133,7 @@ function syncBalancesFromLedger() {
   });
 
   globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
-  const computedAdminBal = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
-  globalLoveBalanceState.adminLoveBalance = computedAdminBal > 0 ? computedAdminBal : 71.00;
+  globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
 }
 
 const SYSTEM_START_DATE = '2026-11-17';
@@ -1120,6 +1101,52 @@ app.post('/api/admin/set-dora', async (req, res) => {
     return res.json({ success: true, email: cleanEmail, isDora: Boolean(isDora), ...result });
   } catch (e) {
     return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/clear-ledger', async (req, res) => {
+  try {
+    const { target = 'both', adminEmail } = req.body || {};
+    const nowTs = Date.now();
+    if (target === 'user') {
+      globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(item => item && (item.target === 'admin' || (item.description && item.description.includes('[Darsh]'))));
+      globalLoveBalanceState.userLastClearedAt = nowTs;
+    } else if (target === 'admin') {
+      globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(item => item && item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
+      globalLoveBalanceState.adminLastClearedAt = nowTs;
+    } else {
+      globalLoveBalanceState.loveLedger = [];
+      globalLoveBalanceState.lastClearedAt = nowTs;
+      globalLoveBalanceState.userLastClearedAt = nowTs;
+      globalLoveBalanceState.adminLastClearedAt = nowTs;
+    }
+    globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+    globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+    persistLoveState();
+    syncActiveDoraUserBalance();
+
+    const payload = {
+      action: 'CLEAR_LEDGER',
+      target,
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      currentLoveBalance: globalLoveBalanceState.loveBalance,
+      currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger,
+      serverTimestamp: nowTs
+    };
+    io.emit('love_balance_action', payload);
+    io.emit('love_balance_broadcast', payload);
+    io.emit('love_balance_heartbeat_sync', {
+      activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+      loveBalance: globalLoveBalanceState.loveBalance,
+      adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      serverTimestamp: nowTs
+    });
+    return res.json({ success: true, ...payload });
+  } catch (err) {
+    console.error('clear-ledger error:', err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -2419,10 +2446,10 @@ io.on('connection', (socket) => {
       const target = data.target || 'user';
       const nowTs = Date.now();
       if (target === 'user') {
-        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target === 'admin' || (item.description && item.description.includes('[Darsh]')));
+        globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(item => item && (item.target === 'admin' || (item.description && item.description.includes('[Darsh]'))));
         globalLoveBalanceState.userLastClearedAt = nowTs;
       } else if (target === 'admin') {
-        globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
+        globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(item => item && item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
         globalLoveBalanceState.adminLastClearedAt = nowTs;
       } else {
         globalLoveBalanceState.loveLedger = [];
@@ -2435,6 +2462,26 @@ io.on('connection', (socket) => {
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
       syncActiveDoraUserBalance();
+
+      const clearPayload = {
+        action: 'CLEAR_LEDGER',
+        target,
+        loveBalance: globalLoveBalanceState.loveBalance,
+        adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        serverTimestamp: nowTs
+      };
+      io.emit('love_balance_action', clearPayload);
+      io.emit('love_balance_broadcast', clearPayload);
+      io.emit('love_balance_heartbeat_sync', {
+        activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+        loveBalance: globalLoveBalanceState.loveBalance,
+        adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        serverTimestamp: nowTs
+      });
+      return;
     } else if (data.action === 'DELETE_TRANSACTION' && data.transactionId) {
       if (!Array.isArray(globalLoveBalanceState.deletedTransactionIds)) {
         globalLoveBalanceState.deletedTransactionIds = [];
