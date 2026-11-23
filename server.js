@@ -117,6 +117,8 @@ function sanitizeLedger(ledger) {
   const seen = new Set();
   const cleaned = [];
   let prevHash = 'GENESIS_BLOCK_0';
+  const lastInstantReplyMap = {};
+
   for (const item of ledger) {
     if (!item) continue;
     if (item.id && seen.has(item.id)) continue;
@@ -133,6 +135,33 @@ function sanitizeLedger(ledger) {
         continue;
       }
     }
+
+    // Deduplicate rapid "Instant Reply" spam entries (allow at most 1 per 60 minutes per target)
+    if (item.description && item.description.includes('Instant Reply')) {
+      const targetKey = item.target || 'user';
+      let entryTimeMs = 0;
+      if (item.id && item.id.startsWith('lb_instant_')) {
+        const parts = item.id.split('_');
+        entryTimeMs = parseInt(parts[2], 10);
+      }
+      if (isNaN(entryTimeMs) || entryTimeMs === 0) {
+        try {
+          entryTimeMs = new Date(item.earnedAt).getTime();
+        } catch (e) {}
+      }
+      if (entryTimeMs > 0) {
+        if (!lastInstantReplyMap[targetKey]) {
+          lastInstantReplyMap[targetKey] = entryTimeMs;
+        } else {
+          // If within 60 minutes of another instant reply for same target, skip duplicate!
+          if (Math.abs(lastInstantReplyMap[targetKey] - entryTimeMs) < 60 * 60 * 1000) {
+            continue;
+          }
+          lastInstantReplyMap[targetKey] = entryTimeMs;
+        }
+      }
+    }
+
     item.points = round2(item.points);
     if (!item.auditHash) {
       item.auditHash = computeAuditHash(item, prevHash);
@@ -2879,24 +2908,28 @@ io.on('connection', (socket) => {
             return;
           }
 
-          // Check 5-minute cooldown per target user to prevent spam
-          const existingInstant = (globalLoveBalanceState.loveLedger || []).find(e => 
-            e && e.target === targetUser && e.type === 'credit' && (e.description || '').includes('Instant Reply')
-          );
-          const lastInstantTime = existingInstant ? new Date(existingInstant.earnedAt || 0).getTime() : 0;
-          const cooldownPassed = !existingInstant || isNaN(lastInstantTime) || (Date.now() - lastInstantTime >= 4 * 60 * 1000);
+          // Strict 60-minute cooldown per target user to ensure Instant Reply is awarded at most ONCE per chat session
+          if (!globalLoveBalanceState.lastInstantReplyTime) {
+            globalLoveBalanceState.lastInstantReplyTime = {};
+          }
+          const lastInstantMs = globalLoveBalanceState.lastInstantReplyTime[targetUser] || 0;
+          const ONE_HOUR_MS = 60 * 60 * 1000;
+          if (Date.now() - lastInstantMs < ONE_HOUR_MS) {
+            return; // Cooldown active: only 1 instant reply point per hour / session
+          }
 
-          if (cooldownPassed) {
-            globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
-            if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
-              globalLoveBalanceState.rewardedTurnMsgIds.shift();
-            }
+          globalLoveBalanceState.lastInstantReplyTime[targetUser] = Date.now();
+          globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
+          if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
+            globalLoveBalanceState.rewardedTurnMsgIds.shift();
+          }
 
-            const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
-            const nowStr = new Date().toLocaleString('en-GB');
-            const expDate = new Date();
-            expDate.setMonth(expDate.getMonth() + 1);
-            const expStr = expDate.toLocaleDateString('en-GB');
+          const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
+          const istNowDate = new Date(Date.now() + istOffset);
+          const nowStr = `${istNowDate.toISOString().split('T')[0]}, ${istNowDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase()}`;
+          const expDate = new Date();
+          expDate.setMonth(expDate.getMonth() + 1);
+          const expStr = expDate.toISOString().split('T')[0];
 
             const replyEntry = {
               id: replyTxId,
