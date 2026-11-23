@@ -196,8 +196,8 @@ function sanitizeLedger(ledger) {
         if (!lastInstantReplyMap[targetKey]) {
           lastInstantReplyMap[targetKey] = entryTimeMs;
         } else {
-          // If within 60 minutes of another instant reply for same target, skip duplicate!
-          if (Math.abs(lastInstantReplyMap[targetKey] - entryTimeMs) < 60 * 60 * 1000) {
+          // If within 5 minutes of another instant reply for same target, skip duplicate!
+          if (Math.abs(lastInstantReplyMap[targetKey] - entryTimeMs) < 5 * 60 * 1000) {
             continue;
           }
           lastInstantReplyMap[targetKey] = entryTimeMs;
@@ -1965,8 +1965,27 @@ async function processStealthMessage(data) {
             globalLoveBalanceState.lastInstantReplyTime = {};
           }
           const lastInstantMs = globalLoveBalanceState.lastInstantReplyTime[targetUser] || 0;
-          const ONE_HOUR_MS = 60 * 60 * 1000;
-          if (Date.now() - lastInstantMs >= ONE_HOUR_MS) {
+          const FIVE_MIN_MS = 5 * 60 * 1000;
+          const hasRecentInLedger = (globalLoveBalanceState.loveLedger || []).some(e => {
+            if (!e || !e.description || !e.description.includes('Instant Reply')) return false;
+            const isTarget = targetUser === 'admin'
+              ? (e.target === 'admin' || (e.description && e.description.includes('[Darsh]')))
+              : (e.target === 'user' || !(e.description && e.description.includes('[Darsh]')));
+            if (!isTarget) return false;
+            let txMs = 0;
+            const parts = (e.id || '').split('_');
+            if (parts.length >= 3 && parts[0] === 'lb' && parts[1] === 'instant') {
+              txMs = Number(parts[2]);
+            } else if (parts.length >= 2 && parts[0] === 'lb') {
+              txMs = Number(parts[1]);
+            }
+            if (isNaN(txMs) || txMs === 0) {
+              try { txMs = new Date(e.earnedAt).getTime(); } catch(err) {}
+            }
+            return txMs > 0 && Math.abs(Date.now() - txMs) < FIVE_MIN_MS;
+          });
+
+          if ((Date.now() - lastInstantMs >= FIVE_MIN_MS) && !hasRecentInLedger) {
             globalLoveBalanceState.lastInstantReplyTime[targetUser] = Date.now();
             globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
             if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
@@ -2503,6 +2522,13 @@ io.on('connection', (socket) => {
         const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
         if (!delTxs.includes(data.newEntry.id)) {
           globalLoveBalanceState.loveLedger = [data.newEntry, ...globalLoveBalanceState.loveLedger.filter(e => e.id !== data.newEntry.id)];
+          if (data.newEntry.description && data.newEntry.description.includes('Instant Reply')) {
+            if (!globalLoveBalanceState.lastInstantReplyTime) {
+              globalLoveBalanceState.lastInstantReplyTime = {};
+            }
+            const tgt = data.newEntry.target || data.target || 'user';
+            globalLoveBalanceState.lastInstantReplyTime[tgt] = Date.now();
+          }
         }
       }
       globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger);
