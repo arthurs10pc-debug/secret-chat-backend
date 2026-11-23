@@ -99,6 +99,13 @@ function computeAuditHash(entry, prevHash = 'GENESIS_BLOCK_0') {
   return CryptoJS.SHA256(payload).toString().substring(0, 16);
 }
 
+function getNowIstEarnedAt() {
+  const d = new Date();
+  const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const timeStr = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }).toLowerCase();
+  return `${dateStr}, ${timeStr}`;
+}
+
 function isSocketAdmin(socket, data = {}) {
   const role = socket.role || data.senderRole || data.role;
   const email = (socket.userEmail || data.userEmail || data.email || '').toLowerCase();
@@ -136,8 +143,20 @@ function sanitizeLedger(ledger) {
       }
     }
 
+    // Convert any legacy UTC "DD/MM/YYYY, HH:mm:ss" strings to proper IST "YYYY-MM-DD, h:mm am/pm"
+    const gbMatch = String(item.earnedAt || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (gbMatch) {
+      const [, day, month, year, h, m, s] = gbMatch;
+      const utcDate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(h), Number(m), Number(s || 0)));
+      const dateStr = utcDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const timeStr = utcDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }).toLowerCase();
+      item.earnedAt = `${dateStr}, ${timeStr}`;
+    }
+
     // Deduplicate rapid "Instant Reply" spam entries (allow at most 1 per 60 minutes per target)
     if (item.description && item.description.includes('Instant Reply')) {
+      item.description = item.description.replace(/Within 5 Mins?/gi, 'Within 1 Min');
+      if (item.remarks) item.remarks = item.remarks.replace(/Within 5 Mins?/gi, 'Within 1 Min');
       const targetKey = item.target || 'user';
       let entryTimeMs = 0;
       if (item.id && item.id.startsWith('lb_instant_')) {
@@ -145,9 +164,13 @@ function sanitizeLedger(ledger) {
         entryTimeMs = parseInt(parts[2], 10);
       }
       if (isNaN(entryTimeMs) || entryTimeMs === 0) {
-        try {
-          entryTimeMs = new Date(item.earnedAt).getTime();
-        } catch (e) {}
+        if (gbMatch) {
+          entryTimeMs = Date.UTC(Number(gbMatch[3]), Number(gbMatch[2]) - 1, Number(gbMatch[1]), Number(gbMatch[4]), Number(gbMatch[5]), Number(gbMatch[6] || 0));
+        } else {
+          try {
+            entryTimeMs = new Date(item.earnedAt).getTime();
+          } catch (e) {}
+        }
       }
       if (entryTimeMs > 0) {
         if (!lastInstantReplyMap[targetKey]) {
@@ -1926,7 +1949,7 @@ io.on('connection', (socket) => {
             sl: 1,
             target: winnerTarget,
             description: `[${winnerLabel}] 🏆 Won ${gameLabel} vs ${loserLabel}`,
-            earnedAt: new Date().toLocaleString('en-GB'),
+            earnedAt: getNowIstEarnedAt(),
             expireDate: '',
             points: bet,
             type: 'credit',
@@ -1939,7 +1962,7 @@ io.on('connection', (socket) => {
             sl: 1,
             target: loserTarget,
             description: `[${loserLabel}] 🎲 ${gameLabel} Match Bet`,
-            earnedAt: new Date().toLocaleString('en-GB'),
+            earnedAt: getNowIstEarnedAt(),
             expireDate: '',
             points: -bet,
             type: 'debit',
@@ -2135,7 +2158,7 @@ io.on('connection', (socket) => {
           sl: 1,
           target,
           description: '[' + targetLabel + '] Admin Balance Adjustment (' + (diff > 0 ? '+' : '') + diff.toFixed(2) + ')',
-          earnedAt: new Date().toLocaleString('en-GB'),
+          earnedAt: getNowIstEarnedAt(),
           expireDate: '',
           points: type === 'credit' ? numAmount : -numAmount,
           type,
@@ -2293,7 +2316,7 @@ io.on('connection', (socket) => {
       const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalId);
       if (!alreadyAwarded && pts > 0) {
         const slotTitle = data.slotTitle || 'Routine Task';
-        const nowStr = new Date().toLocaleString('en-GB');
+        const nowStr = getNowIstEarnedAt();
         const expDate = new Date();
         expDate.setMonth(expDate.getMonth() + 1);
         const creditEntry = {
@@ -2571,7 +2594,7 @@ io.on('connection', (socket) => {
             sl: 1,
             target: 'user',
             description: '[Dora] Approved Task: ' + taskName,
-            earnedAt: new Date().toLocaleString('en-GB'),
+            earnedAt: getNowIstEarnedAt(),
             expireDate: '',
             points: pts,
             type: 'credit',
@@ -2898,7 +2921,8 @@ io.on('connection', (socket) => {
 
       if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
         const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
-        if (diffMs <= 5 * 60 * 1000) {
+        // Award instant reply ONLY if replied within 1 minute (60 seconds)
+        if (diffMs <= 60 * 1000) {
           if (!globalLoveBalanceState.rewardedTurnMsgIds) {
             globalLoveBalanceState.rewardedTurnMsgIds = [];
           }
@@ -2925,44 +2949,43 @@ io.on('connection', (socket) => {
           }
 
           const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
-          const istNowDate = new Date(Date.now() + istOffset);
-          const nowStr = `${istNowDate.toISOString().split('T')[0]}, ${istNowDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase()}`;
+          const nowStr = getNowIstEarnedAt();
           const expDate = new Date();
           expDate.setMonth(expDate.getMonth() + 1);
           const expStr = expDate.toISOString().split('T')[0];
 
-            const replyEntry = {
-              id: replyTxId,
-              sl: 1,
+          const replyEntry = {
+            id: replyTxId,
+            sl: 1,
+            target: targetUser,
+            description: `[${targetLabel}] Instant Reply (Within 1 Min)`,
+            earnedAt: nowStr,
+            expireDate: expStr,
+            points: 1.00,
+            type: 'credit',
+            remarks: 'Instant Reply (Within 1 Min)',
+            status: 'Confirmed'
+          };
+
+          const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+          if (!delTxs.includes(replyTxId)) {
+            globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
+            syncBalancesFromLedger();
+            persistLoveState();
+            syncActiveDoraUserBalance();
+
+            io.emit('love_balance_broadcast', {
+              action: 'TRANSACTION',
               target: targetUser,
-              description: `[${targetLabel}] Instant Reply (Within 5 Mins)`,
-              earnedAt: nowStr,
-              expireDate: expStr,
-              points: 1.00,
+              amount: 1.00,
               type: 'credit',
-              remarks: 'Instant Reply (Within 5 Mins)',
-              status: 'Confirmed'
-            };
-
-            const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-            if (!delTxs.includes(replyTxId)) {
-              globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
-              syncBalancesFromLedger();
-              persistLoveState();
-              syncActiveDoraUserBalance();
-
-              io.emit('love_balance_broadcast', {
-                action: 'TRANSACTION',
-                target: targetUser,
-                amount: 1.00,
-                type: 'credit',
-                reason: 'Instant Reply (Within 5 Mins)',
-                newEntry: replyEntry,
-                loveLedger: globalLoveBalanceState.loveLedger,
-                currentLoveBalance: globalLoveBalanceState.loveBalance,
-                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                serverTimestamp: Date.now()
-              });
+              reason: 'Instant Reply (Within 1 Min)',
+              newEntry: replyEntry,
+              loveLedger: globalLoveBalanceState.loveLedger,
+              currentLoveBalance: globalLoveBalanceState.loveBalance,
+              currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+              serverTimestamp: Date.now()
+            });
 
               io.emit('love_balance_heartbeat_sync', {
                 activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
