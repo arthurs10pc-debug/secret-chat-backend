@@ -393,6 +393,10 @@ mongoose.connect(MONGO_URI)
           if (u && u.email && u.email.toLowerCase() !== 'dora@gmail.com') {
             const k = u.email.toLowerCase();
             const isAdmin = k === 'arthurs10pc@gmail.com';
+            const isDora = isAdmin ? false : (
+              Boolean(u.isDora) || 
+              (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === k)
+            );
             memoryUsers.set(k, {
               ...u,
               email: k,
@@ -401,13 +405,24 @@ mongoose.connect(MONGO_URI)
               fullName: u.fullName || u.originalName || u.name || '',
               role: isAdmin ? 'parent' : 'user',
               isAdmin,
-              isDora: Boolean(u.isDora),
+              isDora,
               loveBalance: typeof u.loveBalance === 'number' ? u.loveBalance : 0,
               loveLedger: Array.isArray(u.loveLedger) ? u.loveLedger : []
             });
           }
         });
       }
+
+      if (globalLoveBalanceState.activeDoraEmail) {
+        const dEmail = globalLoveBalanceState.activeDoraEmail.toLowerCase();
+        const dUser = memoryUsers.get(dEmail);
+        if (dUser) {
+          dUser.isDora = true;
+          memoryUsers.set(dEmail, dUser);
+        }
+        await UserModel.updateOne({ email: dEmail }, { $set: { isDora: true } }).catch(() => {});
+        await UserModel.updateMany({ email: { $nin: [dEmail, 'arthurs10pc@gmail.com'] } }, { $set: { isDora: false } }).catch(() => {});
+      } else {
         const activeDora = Array.from(memoryUsers.values()).find(u => !u.isAdmin && u.isDora);
         if (activeDora) {
           globalLoveBalanceState.activeDoraEmail = activeDora.email;
@@ -420,6 +435,7 @@ mongoose.connect(MONGO_URI)
           }
           persistLoveState();
         }
+      }
     } catch (err) {
       console.warn("Error reading Love Balance from MongoDB:", err);
     }
@@ -743,7 +759,10 @@ app.post('/api/auth/google-login', async (req, res) => {
         existing = await UserModel.findOne({ email: cleanEmail }).lean();
       } catch (err) {}
     }
-    const isDora = existing ? Boolean(existing.isDora) : false;
+    const isDora = isAdmin ? false : (
+      Boolean(existing?.isDora) || 
+      (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === cleanEmail)
+    );
     const incomingBal = typeof req.body.loveBalance === 'number' ? req.body.loveBalance : parseFloat(req.body.loveBalance);
     const incomingLedger = Array.isArray(req.body.loveLedger) ? req.body.loveLedger : [];
 
@@ -816,7 +835,7 @@ app.get('/api/auth/current-user', (req, res) => {
       name: isAdmin ? 'Darsh' : (existing?.name || 'User'),
       firstName: isAdmin ? 'Darsh' : (existing?.firstName || 'User'),
       isAdmin,
-      isDora: isAdmin ? false : Boolean(existing?.isDora),
+      isDora: isAdmin ? false : (Boolean(existing?.isDora) || (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === email)),
       loveBalance: typeof existing?.loveBalance === 'number' ? existing.loveBalance : 0
     }
   });
@@ -1003,6 +1022,16 @@ app.post('/api/user/sync-state', async (req, res) => {
     const numBalance = typeof loveBalance === 'number' ? loveBalance : parseFloat(loveBalance);
 
     let user = memoryUsers.get(cleanEmail);
+    if (!user && mongoose.connection.readyState === 1) {
+      try {
+        user = await UserModel.findOne({ email: cleanEmail }).lean();
+      } catch (err) {}
+    }
+    const isDora = cleanEmail === 'arthurs10pc@gmail.com' ? false : (
+      Boolean(user?.isDora) || 
+      (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === cleanEmail)
+    );
+
     if (!user) {
       const namePart = cleanEmail.split('@')[0];
       const capName = namePart.charAt(0).toUpperCase() + namePart.slice(1);
@@ -1013,12 +1042,13 @@ app.post('/api/user/sync-state', async (req, res) => {
         fullName: cleanEmail,
         role: cleanEmail === 'arthurs10pc@gmail.com' ? 'parent' : 'user',
         isAdmin: cleanEmail === 'arthurs10pc@gmail.com',
-        isDora: false,
+        isDora,
         loveBalance: isNaN(numBalance) ? 0 : numBalance,
         loveLedger: Array.isArray(loveLedger) ? sanitizeLedger(loveLedger) : [],
         lastLogin: new Date()
       };
     } else {
+      user.isDora = isDora;
       if (!isNaN(numBalance)) user.loveBalance = numBalance;
       if (Array.isArray(loveLedger) && loveLedger.length > 0) {
         user.loveLedger = sanitizeLedger([...loveLedger, ...(user.loveLedger || [])]);
@@ -1033,6 +1063,7 @@ app.post('/api/user/sync-state', async (req, res) => {
           { email: cleanEmail },
           {
             $set: {
+              isDora: user.isDora,
               loveBalance: user.loveBalance,
               loveLedger: user.loveLedger,
               lastLogin: new Date()
@@ -1331,7 +1362,7 @@ async function getUsersDirectoryData() {
       }
     }
     const isAdmin = u.email.toLowerCase() === 'arthurs10pc@gmail.com';
-    const isDora = isAdmin ? false : Boolean(u.isDora);
+    const isDora = isAdmin ? false : (Boolean(u.isDora) || (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === u.email.toLowerCase()));
     return {
       email: u.email,
       name: u.name || (isAdmin ? 'Darsh' : (u.firstName || 'User')),
@@ -2304,6 +2335,16 @@ io.on('connection', (socket) => {
     const cleanEmail = (data.email || '').toLowerCase().trim();
     const numBalance = typeof data.loveBalance === 'number' ? data.loveBalance : parseFloat(data.loveBalance);
     let user = memoryUsers.get(cleanEmail);
+    if (!user && mongoose.connection.readyState === 1) {
+      try {
+        user = await UserModel.findOne({ email: cleanEmail }).lean();
+      } catch (err) {}
+    }
+    const isDora = cleanEmail === 'arthurs10pc@gmail.com' ? false : (
+      Boolean(user?.isDora) || 
+      (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === cleanEmail)
+    );
+
     if (!user) {
       const namePart = cleanEmail.split('@')[0];
       const capName = namePart.charAt(0).toUpperCase() + namePart.slice(1);
@@ -2314,12 +2355,13 @@ io.on('connection', (socket) => {
         fullName: cleanEmail,
         role: cleanEmail === 'arthurs10pc@gmail.com' ? 'parent' : 'user',
         isAdmin: cleanEmail === 'arthurs10pc@gmail.com',
-        isDora: false,
+        isDora,
         loveBalance: isNaN(numBalance) ? 0 : numBalance,
         loveLedger: Array.isArray(data.loveLedger) ? sanitizeLedger(data.loveLedger) : [],
         lastLogin: new Date()
       };
     } else {
+      user.isDora = isDora;
       if (!isNaN(numBalance)) user.loveBalance = numBalance;
       if (Array.isArray(data.loveLedger) && data.loveLedger.length > 0) {
         user.loveLedger = sanitizeLedger([...data.loveLedger, ...(user.loveLedger || [])]);
@@ -2332,7 +2374,7 @@ io.on('connection', (socket) => {
       try {
         await UserModel.findOneAndUpdate(
           { email: cleanEmail },
-          { $set: { loveBalance: user.loveBalance, loveLedger: user.loveLedger, lastLogin: new Date() } },
+          { $set: { isDora: user.isDora, loveBalance: user.loveBalance, loveLedger: user.loveLedger, lastLogin: new Date() } },
           { upsert: true, new: true }
         );
       } catch (e) {}
