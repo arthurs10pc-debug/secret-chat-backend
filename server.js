@@ -1949,6 +1949,42 @@ app.post('/api/stealth-messages/send', async (req, res) => {
   }
 });
 
+// Guaranteed REST mark-seen fallback endpoint
+app.post('/api/stealth-messages/mark-seen', async (req, res) => {
+  try {
+    const { room, viewerRole } = req.body || {};
+    const targetRoom = room || 'stealth_master_room';
+    const isDora = (viewerRole === 'user' || viewerRole === 'A');
+
+    memoryMessages.forEach(m => {
+      if (!room || m.room === targetRoom) {
+        const isFromCounterpart = isDora 
+          ? (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H')
+          : (m.senderRole === 'user' || m.senderRole === 'A');
+        if (isFromCounterpart) {
+          m.isSeen = true;
+          m.isDelivered = true;
+        }
+      }
+    });
+
+    io.to(targetRoom).emit('messages_marked_seen', { viewerRole });
+    io.emit('messages_marked_seen', { viewerRole });
+
+    if (mongoose.connection.readyState === 1) {
+      const counterpartRoles = isDora ? ['parent', 'admin', 'H'] : ['user', 'A'];
+      await Message.updateMany(
+        { room: targetRoom, senderRole: { $in: counterpartRoles }, isSeen: false },
+        { $set: { isSeen: true, isDelivered: true } }
+      ).catch(console.error);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("REST mark seen error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
@@ -3056,17 +3092,27 @@ io.on('connection', (socket) => {
 
   socket.on('mark_seen', async ({ room, viewerRole }) => {
     const targetRoom = room || 'stealth_master_room';
-    io.to(targetRoom).emit('messages_marked_seen', { viewerRole });
-    io.emit('messages_marked_seen', { viewerRole });
+    const isDora = (viewerRole === 'user' || viewerRole === 'A');
+
     memoryMessages.forEach(m => {
-      if ((!room || m.room === targetRoom) && m.senderRole !== viewerRole) {
-        m.isSeen = true;
-        m.isDelivered = true;
+      if (!room || m.room === targetRoom) {
+        const isFromCounterpart = isDora 
+          ? (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H')
+          : (m.senderRole === 'user' || m.senderRole === 'A');
+        if (isFromCounterpart) {
+          m.isSeen = true;
+          m.isDelivered = true;
+        }
       }
     });
+
+    io.to(targetRoom).emit('messages_marked_seen', { viewerRole });
+    io.emit('messages_marked_seen', { viewerRole });
+
     if (mongoose.connection.readyState === 1) {
+      const counterpartRoles = isDora ? ['parent', 'admin', 'H'] : ['user', 'A'];
       Message.updateMany(
-        { room: targetRoom, senderRole: { $ne: viewerRole }, isSeen: false },
+        { room: targetRoom, senderRole: { $in: counterpartRoles }, isSeen: false },
         { $set: { isSeen: true, isDelivered: true } }
       ).catch(console.error);
     }
