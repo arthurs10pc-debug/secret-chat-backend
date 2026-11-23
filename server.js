@@ -1386,8 +1386,8 @@ function evaluateRoutineAndHabitInfractions() {
       ledgerChanged = true;
     };
 
-    // Evaluate routine and habits strictly starting from today morning (SYSTEM_START_DATE: '2026-11-17') onwards
-    for (let i = 30; i >= 0; i--) {
+    // Evaluate routine and habits for today and yesterday (preventing retroactive deduction of past 30 days)
+    for (let i = 1; i >= 0; i--) {
       const d = new Date(istNow.getTime() - i * 86400000);
       const dayStr = d.toISOString().split('T')[0];
       if (dayStr < SYSTEM_START_DATE) continue;
