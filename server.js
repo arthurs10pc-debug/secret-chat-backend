@@ -1141,6 +1141,9 @@ app.post('/api/admin/clear-ledger', async (req, res) => {
       activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
       loveBalance: globalLoveBalanceState.loveBalance,
       adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      currentLoveBalance: globalLoveBalanceState.loveBalance,
+      currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+      loveLedger: globalLoveBalanceState.loveLedger,
       serverTimestamp: nowTs
     });
     return res.json({ success: true, ...payload });
@@ -2479,6 +2482,9 @@ io.on('connection', (socket) => {
         activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
         loveBalance: globalLoveBalanceState.loveBalance,
         adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        loveLedger: globalLoveBalanceState.loveLedger,
         serverTimestamp: nowTs
       });
       return;
@@ -2548,13 +2554,6 @@ io.on('connection', (socket) => {
       const activeDeleted = globalLoveBalanceState.deletedSlotIds || [];
       const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
       
-      if (typeof data.loveBalance === 'number' && data.loveBalance > 0 && globalLoveBalanceState.loveBalance === 0) {
-        globalLoveBalanceState.loveBalance = data.loveBalance;
-      }
-      if (Array.isArray(data.loveLedger) && data.loveLedger.length > 0 && (globalLoveBalanceState.loveLedger || []).length <= 1) {
-        globalLoveBalanceState.loveLedger = sanitizeLedger([...data.loveLedger, ...(globalLoveBalanceState.loveLedger || [])]);
-      }
-
       // Filter out any deleted transactions strictly
       globalLoveBalanceState.loveLedger = sanitizeLedger(globalLoveBalanceState.loveLedger).filter(e => e && !delTxs.includes(e.id));
       syncBalancesFromLedger();
