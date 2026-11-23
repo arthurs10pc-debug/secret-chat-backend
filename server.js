@@ -1765,6 +1765,190 @@ const globalCoupleGamesState = {
   activeChallenge: null
 };
 
+// --- UNIFIED ULTRA-RELIABLE STEALTH MESSAGE PROCESSOR (SOCKET + HTTP REST DUAL-PATH) ---
+async function processStealthMessage(data) {
+  const { room, role, encryptedText, isMedia, replyRefId, clientMsgId } = data || {};
+  if (!encryptedText) return null;
+
+  io.emit('peer_typing_status', { isTyping: false });
+
+  // 1. Deduplication by clientMsgId
+  if (clientMsgId && memoryMessages.some(m => m.clientMsgId && m.clientMsgId === clientMsgId)) {
+    return memoryMessages.find(m => m.clientMsgId === clientMsgId);
+  }
+
+  const plainText = decryptText(encryptedText);
+  const msgTimestamp = new Date();
+
+  // 2. Deduplication of identical payload within 1.5s
+  const recentDuplicate = memoryMessages.find(m => 
+    m.senderRole === role && 
+    m.encryptedText === encryptedText && 
+    (Date.now() - new Date(m.timestamp).getTime()) < 1500
+  );
+  if (recentDuplicate) {
+    return recentDuplicate;
+  }
+
+  const counterpartRole = (role === 'user' || role === 'A') ? 'parent' : 'user';
+  let isCounterpartOnline = false;
+  for (const [sId, info] of activeRoomUsers.entries()) {
+    const liveSocket = io.sockets.sockets.get(sId);
+    const isLive = liveSocket && liveSocket.connected;
+    if (isLive && info && (info.role === counterpartRole || (counterpartRole === 'parent' && info.role === 'admin'))) {
+      isCounterpartOnline = true;
+      break;
+    }
+  }
+
+  const newMsgData = {
+    _id: new mongoose.Types.ObjectId().toString(),
+    clientMsgId: clientMsgId || null,
+    room: room || 'stealth_master_room',
+    senderRole: role,
+    encryptedText,
+    text: plainText,
+    timestamp: msgTimestamp,
+    flaggedPending: false,
+    isSeen: false,
+    isDelivered: isCounterpartOnline,
+    isMedia: Boolean(isMedia),
+    mediaType: data.mediaType || (Boolean(isMedia) ? 'photo' : 'text'),
+    mediaOpened: false,
+    reaction: null,
+    isPinned: Boolean(data.isPinned),
+    isStarred: Boolean(data.isStarred),
+    replyRefId: replyRefId || null
+  };
+
+  // Always push to in-memory messages for instant real-time parity
+  memoryMessages.push(newMsgData);
+
+  const targetRoom = room || 'stealth_master_room';
+  io.to(targetRoom).emit('receive_stealth_msg', newMsgData);
+  io.emit('receive_stealth_msg', newMsgData);
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      Message.create(newMsgData).catch(console.error);
+    }
+  } catch (err) {
+    console.error("Error saving message:", err);
+  }
+
+  // Real-time server-side message karma evaluation (2-way for Dora & Darsh)
+  try {
+    const isSenderDora = (role === 'user' || role === 'A');
+    const targetUser = isSenderDora ? 'user' : 'admin';
+    const targetLabel = isSenderDora ? 'Dora' : 'Darsh';
+
+    const priorMsgs = memoryMessages.filter(m => 
+      m && m.room === (room || 'stealth_master_room') && 
+      m._id !== newMsgData._id &&
+      (isSenderDora 
+        ? (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H')
+        : (m.senderRole === 'user' || m.senderRole === 'A')) &&
+      m.timestamp
+    );
+    const lastCounterpartMsg = priorMsgs.length > 0 ? priorMsgs[priorMsgs.length - 1] : null;
+
+    if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
+      const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
+      if (diffMs <= 30 * 1000) {
+        if (!globalLoveBalanceState.rewardedTurnMsgIds) {
+          globalLoveBalanceState.rewardedTurnMsgIds = [];
+        }
+        const turnKey = `${lastCounterpartMsg._id}_${targetUser}`;
+        if (!globalLoveBalanceState.rewardedTurnMsgIds.includes(turnKey)) {
+          if (!globalLoveBalanceState.lastInstantReplyTime) {
+            globalLoveBalanceState.lastInstantReplyTime = {};
+          }
+          const lastInstantMs = globalLoveBalanceState.lastInstantReplyTime[targetUser] || 0;
+          const ONE_HOUR_MS = 60 * 60 * 1000;
+          if (Date.now() - lastInstantMs >= ONE_HOUR_MS) {
+            globalLoveBalanceState.lastInstantReplyTime[targetUser] = Date.now();
+            globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
+            if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
+              globalLoveBalanceState.rewardedTurnMsgIds.shift();
+            }
+
+            const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
+            const nowStr = getNowIstEarnedAt();
+            const expDate = new Date();
+            expDate.setMonth(expDate.getMonth() + 1);
+            const expStr = expDate.toISOString().split('T')[0];
+
+            const replyEntry = {
+              id: replyTxId,
+              sl: 1,
+              target: targetUser,
+              description: `[${targetLabel}] Instant Reply (Within 30 Sec)`,
+              earnedAt: nowStr,
+              expireDate: expStr,
+              points: 0.50,
+              type: 'credit',
+              remarks: 'Instant Reply (Within 30 Sec)',
+              status: 'Confirmed'
+            };
+
+            const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
+            if (!delTxs.includes(replyTxId)) {
+              globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
+              syncBalancesFromLedger();
+              persistLoveState();
+              syncActiveDoraUserBalance();
+
+              io.emit('love_balance_broadcast', {
+                action: 'TRANSACTION',
+                target: targetUser,
+                amount: 0.50,
+                type: 'credit',
+                reason: 'Instant Reply (Within 30 Sec)',
+                newEntry: replyEntry,
+                loveLedger: globalLoveBalanceState.loveLedger,
+                currentLoveBalance: globalLoveBalanceState.loveBalance,
+                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                serverTimestamp: Date.now()
+              });
+
+              io.emit('love_balance_heartbeat_sync', {
+                activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
+                loveBalance: globalLoveBalanceState.loveBalance,
+                adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                currentLoveBalance: globalLoveBalanceState.loveBalance,
+                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+                loveLedger: globalLoveBalanceState.loveLedger,
+                wishRequests: globalLoveBalanceState.wishRequests,
+                dailySubmissions: memoryDailySubmissions,
+                dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
+                deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
+                deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
+                lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+                serverTimestamp: Date.now()
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Error evaluating server instant reply rule:", e);
+  }
+
+  return newMsgData;
+}
+
+// Guaranteed REST message dispatch fallback endpoint
+app.post('/api/stealth-messages/send', async (req, res) => {
+  try {
+    const msg = await processStealthMessage(req.body);
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    console.error("REST send stealth message error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
   socket.on('join_room', async ({ room, role }) => {
     socket.join(room);
@@ -2863,163 +3047,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_stealth_msg', async (data) => {
-    const { room, role, encryptedText, isMedia, replyRefId } = data;
-    io.emit('peer_typing_status', { isTyping: false });
-
-    const plainText = decryptText(encryptedText);
-    const msgTimestamp = new Date();
-
-    const counterpartRole = (role === 'user' || role === 'A') ? 'parent' : 'user';
-    let isCounterpartOnline = false;
-    for (const [sId, info] of activeRoomUsers.entries()) {
-      const liveSocket = io.sockets.sockets.get(sId);
-      const isLive = liveSocket && liveSocket.connected;
-      if (isLive && info && (info.role === counterpartRole || (counterpartRole === 'parent' && info.role === 'admin'))) {
-        isCounterpartOnline = true;
-        break;
-      }
-    }
-
-    const newMsgData = {
-      _id: new mongoose.Types.ObjectId().toString(),
-      room,
-      senderRole: role,
-      encryptedText,
-      text: plainText,
-      timestamp: msgTimestamp,
-      flaggedPending: false,
-      isSeen: false,
-      isDelivered: isCounterpartOnline,
-      isMedia: Boolean(isMedia),
-      mediaType: data.mediaType || (Boolean(isMedia) ? 'photo' : 'text'),
-      mediaOpened: false,
-      reaction: null,
-      isPinned: Boolean(data.isPinned),
-      isStarred: Boolean(data.isStarred),
-      replyRefId: replyRefId || null
-    };
-
-    // Always push to in-memory messages for instant real-time parity
-    memoryMessages.push(newMsgData);
-
-    const targetRoom = room || 'stealth_master_room';
-    io.to(targetRoom).emit('receive_stealth_msg', newMsgData);
-    io.emit('receive_stealth_msg', newMsgData);
-
     try {
-      if (mongoose.connection.readyState === 1) {
-        Message.create(newMsgData).catch(console.error);
-      }
+      await processStealthMessage(data);
     } catch (err) {
-      console.error("Error saving message:", err);
-    }
-
-    // --- REAL-TIME SERVER-SIDE MESSAGE KARMA EVALUATION (2-WAY FOR BOTH DORA & DARSH) ---
-    // Rule: When either Dora or Darsh sends an instant reply to counterpart within 5 minutes, award +1.00 Point
-    try {
-      const isSenderDora = (role === 'user' || role === 'A');
-      const targetUser = isSenderDora ? 'user' : 'admin';
-      const targetLabel = isSenderDora ? 'Dora' : 'Darsh';
-
-      const priorMsgs = memoryMessages.filter(m => 
-        m && m.room === room && 
-        m._id !== newMsgData._id &&
-        (isSenderDora 
-          ? (m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H')
-          : (m.senderRole === 'user' || m.senderRole === 'A')) &&
-        m.timestamp
-      );
-      const lastCounterpartMsg = priorMsgs.length > 0 ? priorMsgs[priorMsgs.length - 1] : null;
-
-      if (lastCounterpartMsg && lastCounterpartMsg.timestamp) {
-        const diffMs = Math.abs(msgTimestamp.getTime() - new Date(lastCounterpartMsg.timestamp).getTime());
-        // Award instant reply ONLY if replied within 30 seconds (0.50 points)
-        if (diffMs <= 30 * 1000) {
-          if (!globalLoveBalanceState.rewardedTurnMsgIds) {
-            globalLoveBalanceState.rewardedTurnMsgIds = [];
-          }
-          const turnKey = `${lastCounterpartMsg._id}_${targetUser}`;
-          if (globalLoveBalanceState.rewardedTurnMsgIds.includes(turnKey)) {
-            // Turn already rewarded; avoid duplicate spam rewards in the same reply window
-            return;
-          }
-
-          // Strict 60-minute cooldown per target user to ensure Instant Reply is awarded at most ONCE per chat session
-          if (!globalLoveBalanceState.lastInstantReplyTime) {
-            globalLoveBalanceState.lastInstantReplyTime = {};
-          }
-          const lastInstantMs = globalLoveBalanceState.lastInstantReplyTime[targetUser] || 0;
-          const ONE_HOUR_MS = 60 * 60 * 1000;
-          if (Date.now() - lastInstantMs < ONE_HOUR_MS) {
-            return; // Cooldown active: only 1 instant reply point per hour / session
-          }
-
-          globalLoveBalanceState.lastInstantReplyTime[targetUser] = Date.now();
-          globalLoveBalanceState.rewardedTurnMsgIds.push(turnKey);
-          if (globalLoveBalanceState.rewardedTurnMsgIds.length > 500) {
-            globalLoveBalanceState.rewardedTurnMsgIds.shift();
-          }
-
-          const replyTxId = `lb_instant_${Date.now()}_${targetUser}`;
-          const nowStr = getNowIstEarnedAt();
-          const expDate = new Date();
-          expDate.setMonth(expDate.getMonth() + 1);
-          const expStr = expDate.toISOString().split('T')[0];
-
-          const replyEntry = {
-            id: replyTxId,
-            sl: 1,
-            target: targetUser,
-            description: `[${targetLabel}] Instant Reply (Within 30 Sec)`,
-            earnedAt: nowStr,
-            expireDate: expStr,
-            points: 0.50,
-            type: 'credit',
-            remarks: 'Instant Reply (Within 30 Sec)',
-            status: 'Confirmed'
-          };
-
-          const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
-          if (!delTxs.includes(replyTxId)) {
-            globalLoveBalanceState.loveLedger = [replyEntry, ...(globalLoveBalanceState.loveLedger || [])];
-            syncBalancesFromLedger();
-            persistLoveState();
-            syncActiveDoraUserBalance();
-
-            io.emit('love_balance_broadcast', {
-              action: 'TRANSACTION',
-              target: targetUser,
-              amount: 0.50,
-              type: 'credit',
-              reason: 'Instant Reply (Within 30 Sec)',
-              newEntry: replyEntry,
-              loveLedger: globalLoveBalanceState.loveLedger,
-              currentLoveBalance: globalLoveBalanceState.loveBalance,
-              currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-              serverTimestamp: Date.now()
-            });
-
-              io.emit('love_balance_heartbeat_sync', {
-                activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
-                loveBalance: globalLoveBalanceState.loveBalance,
-                adminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                currentLoveBalance: globalLoveBalanceState.loveBalance,
-                currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
-                loveLedger: globalLoveBalanceState.loveLedger,
-                wishRequests: globalLoveBalanceState.wishRequests,
-                dailySubmissions: memoryDailySubmissions,
-                dailySlots: (memoryDailySlots || []).filter(s => s && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id)),
-                deletedSlotIds: globalLoveBalanceState.deletedSlotIds || [],
-                deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
-                lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
-                serverTimestamp: Date.now()
-              });
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("Error evaluating server instant reply rule:", e);
+      console.error("Error in send_stealth_msg socket:", err);
     }
   });
 
