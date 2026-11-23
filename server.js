@@ -3075,6 +3075,58 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('daily_task_delete_submission', async (payload) => {
+    try {
+      if (!isSocketAdmin(socket, payload)) {
+        console.warn('Unauthorized daily_task_delete_submission blocked from socket:', socket.id);
+        return;
+      }
+      const { submissionId, slotId, date, approvalId } = payload || {};
+      if (!submissionId && !slotId) return;
+
+      if (mongoose.connection.readyState === 1) {
+        const query = submissionId ? { id: submissionId } : { slotId: slotId, date: date };
+        await DailyTaskSubmission.deleteMany(query).catch(err => console.error('Error deleting DailyTaskSubmission in Mongo:', err));
+      }
+
+      // Remove from memoryDailySubmissions
+      const removeIdx = memoryDailySubmissions.findIndex(s => 
+        (submissionId && s.id === submissionId) || (slotId && s.slotId === slotId && (!date || s.date === date))
+      );
+      if (removeIdx !== -1) {
+        memoryDailySubmissions.splice(removeIdx, 1);
+      }
+
+      // Remove approval transaction from loveLedger
+      const apprId = approvalId || ('lb_appr_' + (submissionId || `${date}_${slotId}`));
+      globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(e => 
+        e && e.id !== apprId && !(slotId && e.id && e.id.includes(slotId))
+      );
+      globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+      globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+      persistLoveState();
+      syncActiveDoraUserBalance();
+
+      io.emit('daily_task_submission_deleted', {
+        submissionId,
+        slotId,
+        date: date || getISTDateString(),
+        approvalId: apprId
+      });
+
+      io.emit('love_balance_broadcast', {
+        action: 'DELETE_TRANSACTION',
+        transactionId: apprId,
+        loveLedger: globalLoveBalanceState.loveLedger,
+        currentLoveBalance: globalLoveBalanceState.loveBalance,
+        currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+        serverTimestamp: Date.now()
+      });
+    } catch (err) {
+      console.error('Error in daily_task_delete_submission:', err);
+    }
+  });
+
   socket.on('daily_slot_create', async (slotData) => {
     try {
       if (!isSocketAdmin(socket, slotData)) {
