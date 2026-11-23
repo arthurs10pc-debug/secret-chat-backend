@@ -158,6 +158,8 @@ try {
         deletedSlotIds: Array.isArray(parsed.deletedSlotIds) ? parsed.deletedSlotIds : [],
         deletedTransactionIds: Array.isArray(parsed.deletedTransactionIds) ? parsed.deletedTransactionIds : [],
         lastClearedAt: typeof parsed.lastClearedAt === 'number' ? parsed.lastClearedAt : 0,
+        userLastClearedAt: typeof parsed.userLastClearedAt === 'number' ? parsed.userLastClearedAt : 0,
+        adminLastClearedAt: typeof parsed.adminLastClearedAt === 'number' ? parsed.adminLastClearedAt : 0,
         dailySlots: Array.isArray(parsed.dailySlots) ? parsed.dailySlots : []
       };
       syncBalancesFromLedger();
@@ -177,6 +179,8 @@ const loveBalanceSchema = new mongoose.Schema({
   deletedSlotIds: { type: Array, default: [] },
   deletedTransactionIds: { type: Array, default: [] },
   lastClearedAt: { type: Number, default: 0 },
+  userLastClearedAt: { type: Number, default: 0 },
+  adminLastClearedAt: { type: Number, default: 0 },
   dailySlots: { type: Array, default: [] }
 }, { timestamps: true });
 
@@ -207,6 +211,8 @@ function persistLoveState() {
           deletedSlotIds: globalLoveBalanceState.deletedSlotIds,
           deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds,
           lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
+          userLastClearedAt: globalLoveBalanceState.userLastClearedAt || 0,
+          adminLastClearedAt: globalLoveBalanceState.adminLastClearedAt || 0,
           dailySlots: globalLoveBalanceState.dailySlots
         },
         { upsert: true, new: true }
@@ -245,6 +251,12 @@ mongoose.connect(MONGO_URI)
         }
         if (typeof doc.lastClearedAt === 'number') {
           globalLoveBalanceState.lastClearedAt = doc.lastClearedAt;
+        }
+        if (typeof doc.userLastClearedAt === 'number') {
+          globalLoveBalanceState.userLastClearedAt = doc.userLastClearedAt;
+        }
+        if (typeof doc.adminLastClearedAt === 'number') {
+          globalLoveBalanceState.adminLastClearedAt = doc.adminLastClearedAt;
         }
         if (Array.isArray(doc.loveLedger)) {
           const activeDelTxs = globalLoveBalanceState.deletedTransactionIds || [];
@@ -1331,7 +1343,9 @@ function evaluateRoutineAndHabitInfractions() {
     };
 
     const lastCleared = globalLoveBalanceState.lastClearedAt || 0;
-    const clearedDateStr = lastCleared > 0 ? new Date(lastCleared + istOffset).toISOString().split('T')[0] : '';
+    const userEffectiveClearTime = Math.max(lastCleared, globalLoveBalanceState.userLastClearedAt || 0);
+    const adminEffectiveClearTime = Math.max(lastCleared, globalLoveBalanceState.adminLastClearedAt || 0);
+    const clearedDateStr = userEffectiveClearTime > 0 ? new Date(userEffectiveClearTime + istOffset).toISOString().split('T')[0] : '';
     const delTxs = globalLoveBalanceState.deletedTransactionIds || [];
     const activeSlots = (memoryDailySlots || []).filter(s => s && s.isActive && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
     let ledgerChanged = false;
@@ -1385,82 +1399,94 @@ function evaluateRoutineAndHabitInfractions() {
 
       // 1. MORNING GREETING (5:00 AM - 9:00 AM)
       if (isPastDay || (isToday && currentHour >= 9)) {
-        // Dora morning check
-        const doraMId = `habit_morning_${dayStr}_user`;
-        const hadDoraMorning = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
-          return isDora && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-        });
-        if (hadDoraMorning) {
-          if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'credit')) {
-            addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
-          }
-        } else {
-          if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'debit')) {
-            addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr, 'Morning', '09:00 am');
+        const morningDeadlineMs = new Date(`${dayStr}T09:00:00+05:30`).getTime();
+
+        // Dora morning check (only if deadline is after clear timestamp)
+        if (!(userEffectiveClearTime > 0 && morningDeadlineMs <= userEffectiveClearTime)) {
+          const doraMId = `habit_morning_${dayStr}_user`;
+          const hadDoraMorning = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+            return isDora && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+          });
+          if (hadDoraMorning) {
+            if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'credit')) {
+              addHabitEntry(doraMId, 'user', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
+            }
+          } else {
+            if (!hasEntry(doraMId, 'user', dayStr, 'Morning', 'debit')) {
+              addHabitEntry(doraMId, 'user', 'debit', 2.00, `Missed Morning Greeting (${dayStr})`, 'Missed Morning Greeting Before 9:00 AM', dayStr, 'Morning', '09:00 am');
+            }
           }
         }
 
-        // Darsh morning check
-        const darshMId = `habit_morning_${dayStr}_admin`;
-        const hadDarshMorning = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
-          return isDarsh && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
-        });
-        if (hadDarshMorning) {
-          if (!hasEntry(darshMId, 'admin', dayStr, 'Morning', 'credit')) {
-            addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
+        // Darsh morning check (only if deadline is after clear timestamp)
+        if (!(adminEffectiveClearTime > 0 && morningDeadlineMs <= adminEffectiveClearTime)) {
+          const darshMId = `habit_morning_${dayStr}_admin`;
+          const hadDarshMorning = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+            return isDarsh && mDate === dayStr && mHour >= 5 && mHour < 9 && isMorningMsg(m.text || '');
+          });
+          if (hadDarshMorning) {
+            if (!hasEntry(darshMId, 'admin', dayStr, 'Morning', 'credit')) {
+              addHabitEntry(darshMId, 'admin', 'credit', 2.00, `Daily Morning Sweet Text (${dayStr})`, 'Daily Morning Sweet Greeting', dayStr, 'Morning', '09:00 am');
+            }
           }
         }
       }
 
       // 2. GOOD NIGHT (8:00 PM - 5:00 AM next morning)
       if (isPastDay) {
-        // Dora night check
-        const doraNId = `habit_night_${dayStr}_user`;
-        const hadDoraNight = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDora = m.senderRole === 'user' || m.senderRole === 'A';
-          const eve = mDate === dayStr && mHour >= 20;
-          const wee = mDate === nextDayStr && mHour < 5;
-          return isDora && (eve || wee) && isGoodNightMsg(m.text || '');
-        });
-        if (hadDoraNight) {
-          if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'credit')) {
-            addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
-          }
-        } else {
-          if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'debit')) {
-            addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr, 'Good Night', '11:00 pm');
+        const nightDeadlineMs = new Date(`${nextDayStr}T05:00:00+05:30`).getTime();
+
+        // Dora night check (only if deadline is after clear timestamp)
+        if (!(userEffectiveClearTime > 0 && nightDeadlineMs <= userEffectiveClearTime)) {
+          const doraNId = `habit_night_${dayStr}_user`;
+          const hadDoraNight = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDora = m.senderRole === 'user' || m.senderRole === 'A';
+            const eve = mDate === dayStr && mHour >= 20;
+            const wee = mDate === nextDayStr && mHour < 5;
+            return isDora && (eve || wee) && isGoodNightMsg(m.text || '');
+          });
+          if (hadDoraNight) {
+            if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'credit')) {
+              addHabitEntry(doraNId, 'user', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
+            }
+          } else {
+            if (!hasEntry(doraNId, 'user', dayStr, 'Good Night', 'debit')) {
+              addHabitEntry(doraNId, 'user', 'debit', 3.00, `Sleeping Without "Good Night" (${dayStr})`, 'Sleeping Without "Good Night"', dayStr, 'Good Night', '11:00 pm');
+            }
           }
         }
 
-        // Darsh night check
-        const darshNId = `habit_night_${dayStr}_admin`;
-        const hadDarshNight = msgs.some(m => {
-          if (!m || !m.timestamp) return false;
-          const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
-          const mDate = mIst.toISOString().split('T')[0];
-          const mHour = mIst.getUTCHours();
-          const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
-          const eve = mDate === dayStr && mHour >= 20;
-          const wee = mDate === nextDayStr && mHour < 5;
-          return isDarsh && (eve || wee) && isGoodNightMsg(m.text || '');
-        });
-        if (hadDarshNight) {
-          if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night', 'credit')) {
-            addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
+        // Darsh night check (only if deadline is after clear timestamp)
+        if (!(adminEffectiveClearTime > 0 && nightDeadlineMs <= adminEffectiveClearTime)) {
+          const darshNId = `habit_night_${dayStr}_admin`;
+          const hadDarshNight = msgs.some(m => {
+            if (!m || !m.timestamp) return false;
+            const mIst = new Date(new Date(m.timestamp).getTime() + istOffset);
+            const mDate = mIst.toISOString().split('T')[0];
+            const mHour = mIst.getUTCHours();
+            const isDarsh = m.senderRole === 'parent' || m.senderRole === 'admin' || m.senderRole === 'H';
+            const eve = mDate === dayStr && mHour >= 20;
+            const wee = mDate === nextDayStr && mHour < 5;
+            return isDarsh && (eve || wee) && isGoodNightMsg(m.text || '');
+          });
+          if (hadDarshNight) {
+            if (!hasEntry(darshNId, 'admin', dayStr, 'Good Night', 'credit')) {
+              addHabitEntry(darshNId, 'admin', 'credit', 2.00, `Sweet Good Night Wish (${dayStr})`, 'Sweet Good Night Wish', dayStr, 'Good Night', '11:00 pm');
+            }
           }
         }
       }
@@ -1470,6 +1496,16 @@ function evaluateRoutineAndHabitInfractions() {
         const slotEndMinutes = parseSlotEndMinutes(slot);
         const isOverdue = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes > slotEndMinutes);
         if (!isOverdue) return;
+
+        // If the slot deadline expired before or at the clear timestamp, DO NOT deduct!
+        if (slotEndMinutes !== null) {
+          const endH = Math.floor(slotEndMinutes / 60);
+          const endM = slotEndMinutes % 60;
+          const slotDeadlineMs = new Date(`${dayStr}T${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}:00+05:30`).getTime();
+          if (userEffectiveClearTime > 0 && slotDeadlineMs <= userEffectiveClearTime) {
+            return;
+          }
+        }
 
         const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
         const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
@@ -1514,18 +1550,29 @@ function evaluateRoutineAndHabitInfractions() {
         const pts = parseFloat(sub.pointsAwarded || sub.points || 2.0);
         const subDate = sub.date || todayStr;
         if (clearedDateStr && subDate < clearedDateStr) return;
+        const subTime = sub.reviewedAt ? new Date(sub.reviewedAt).getTime() : (sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0);
+        if (userEffectiveClearTime > 0 && subTime > 0 && subTime <= userEffectiveClearTime) return;
         const approvalEntryId = 'lb_appr_' + (sub.id || `${subDate}_${sub.slotId}`);
         if (delTxs.includes(approvalEntryId)) return;
         const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === approvalEntryId);
         if (!alreadyAwarded) {
           const slot = (memoryDailySlots || []).find(s => s && s.id === sub.slotId);
           const taskName = sub.slotTitle || (slot ? slot.title : 'Routine Task');
+          let earnedAtTime = '12:00 pm';
+          if (sub.reviewedAt || sub.submittedAt) {
+            try {
+              const dt = new Date(sub.reviewedAt || sub.submittedAt);
+              earnedAtTime = dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }).toLowerCase();
+            } catch (e) {}
+          } else if (slot && slot.timeRange) {
+            earnedAtTime = slot.timeRange.split('-')[0].trim();
+          }
           const entry = {
             id: approvalEntryId,
             sl: 1,
             target: 'user',
             description: `[Dora] Approved Task: ${taskName}`,
-            earnedAt: `${subDate}, 12:00 pm`,
+            earnedAt: `${subDate}, ${earnedAtTime}`,
             expireDate: '',
             points: pts,
             type: 'credit',
@@ -2004,14 +2051,20 @@ io.on('connection', (socket) => {
 
     if (data.action === 'CLEAR_LEDGER') {
       const target = data.target || 'user';
+      const nowTs = Date.now();
       if (target === 'user') {
         globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target === 'admin' || (item.description && item.description.includes('[Darsh]')));
+        globalLoveBalanceState.userLastClearedAt = nowTs;
       } else if (target === 'admin') {
         globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(item => item.target !== 'admin' && !(item.description && item.description.includes('[Darsh]')));
+        globalLoveBalanceState.adminLastClearedAt = nowTs;
       } else {
         globalLoveBalanceState.loveLedger = [];
+        globalLoveBalanceState.lastClearedAt = nowTs;
+        globalLoveBalanceState.userLastClearedAt = nowTs;
+        globalLoveBalanceState.adminLastClearedAt = nowTs;
       }
-      globalLoveBalanceState.lastClearedAt = Date.now();
+      globalLoveBalanceState.lastClearedAt = nowTs;
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
