@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const compression = require('compression');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -22,6 +23,9 @@ function decryptText(ciphertext) {
 
 const app = express();
 const server = http.createServer(app);
+
+// Enable Gzip/Brotli wire compression for lightning-fast API responses
+app.use(compression());
 
 app.use(cors({
   origin: "*",
@@ -399,6 +403,10 @@ const messageSchema = new mongoose.Schema({
   replyRefId: { type: String, default: null }
 });
 
+// Database indexes for millisecond query performance
+messageSchema.index({ room: 1, timestamp: -1 });
+messageSchema.index({ room: 1, isSeen: 1 });
+
 const Message = mongoose.model('Message', messageSchema);
 const memoryMessages = [];
 
@@ -428,6 +436,8 @@ const dailyTaskSubmissionSchema = new mongoose.Schema({
   reviewedAt: { type: Date, default: null },
   adminFeedback: { type: String, default: '' }
 }, { timestamps: true });
+
+dailyTaskSubmissionSchema.index({ date: 1, slotId: 1 });
 
 const DailyTaskSubmission = mongoose.model('DailyTaskSubmission', dailyTaskSubmissionSchema);
 
@@ -650,6 +660,8 @@ const userSchema = new mongoose.Schema({
   loveLedger: { type: Array, default: [] },
   lastLogin: { type: Date, default: Date.now }
 });
+
+userSchema.index({ isDora: 1 });
 
 const UserModel = mongoose.model('User', userSchema);
 
@@ -3193,7 +3205,33 @@ io.on('connection', (socket) => {
   });
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: Math.floor(process.uptime()), timestamp: Date.now() });
+});
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Stealth chat backend running on port ${PORT}`);
+
+  // --- RENDER FREE-TIER COLD START PREVENTER (KEEP-ALIVE SELF-PING) ---
+  // Render Free Tier sleeps after 15 mins of inactivity.
+  // Pinging /health every 10 minutes keeps the server warm and awake 24/7 with zero lag!
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL;
+  if (pingUrl) {
+    const https = require('https');
+    const http = require('http');
+    const client = pingUrl.startsWith('https') ? https : http;
+    const targetEndpoint = `${pingUrl.replace(/\/$/, '')}/health`;
+    
+    setInterval(() => {
+      try {
+        client.get(targetEndpoint, (res) => {
+          // Warm keep-alive success
+        }).on('error', () => {
+          // Network fluctuation ignore
+        });
+      } catch (e) {}
+    }, 10 * 60 * 1000); // Every 10 mins
+    console.log(`[KeepAlive] Scheduled self-ping to ${targetEndpoint} every 10 minutes.`);
+  }
 });
