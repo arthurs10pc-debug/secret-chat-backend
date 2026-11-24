@@ -3259,6 +3259,62 @@ io.on('connection', (socket) => {
         });
       }
 
+      // Check if all active daily routine slots for targetDate are now APPROVED -> Award Star Bonus
+      const targetDate = date || (updatedSubmission && updatedSubmission.date) || getISTDateString();
+      const activeSlots = (memoryDailySlots || []).filter(s => s && s.isActive && !(globalLoveBalanceState.deletedSlotIds || []).includes(s.id));
+      const totalActive = activeSlots.length;
+
+      if (totalActive > 0) {
+        const allApproved = activeSlots.every(slot => {
+          const subItem = memoryDailySubmissions.find(s => s && s.slotId === slot.id && s.date === targetDate && s.status === 'APPROVED');
+          return !!subItem;
+        });
+
+        if (allApproved) {
+          const starBonusPoints = parseFloat((totalActive * 2.0).toFixed(2));
+          const starBonusId = `lb_daily_star_bonus_${targetDate}`;
+          const alreadyAwarded = (globalLoveBalanceState.loveLedger || []).some(e => e && e.id === starBonusId);
+
+          if (!alreadyAwarded) {
+            const starEntry = {
+              id: starBonusId,
+              sl: 1,
+              target: 'user',
+              description: `[Dora] ⭐ All Daily Slots Completed Bonus (${totalActive}/${totalActive} Slots)`,
+              earnedAt: getNowIstEarnedAt(),
+              expireDate: '',
+              points: starBonusPoints,
+              type: 'credit',
+              remarks: `⭐ Star Bonus: Completed all ${totalActive} daily routine slots for ${targetDate}! (+₹2 per slot)`,
+              status: 'Confirmed'
+            };
+            globalLoveBalanceState.loveLedger = [starEntry, ...(globalLoveBalanceState.loveLedger || [])];
+            persistLoveState();
+            syncActiveDoraUserBalance();
+            broadcastUsersDirectory();
+
+            io.emit('love_balance_broadcast', {
+              action: 'TRANSACTION',
+              target: 'user',
+              amount: starBonusPoints,
+              type: 'credit',
+              reason: `⭐ All Slots Bonus Awarded (${totalActive}/${totalActive})`,
+              loveLedger: globalLoveBalanceState.loveLedger,
+              currentLoveBalance: globalLoveBalanceState.loveBalance,
+              currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+              serverTimestamp: Date.now()
+            });
+
+            sendWebPushNotification({
+              title: `⭐ Star Bonus Unlocked! (+₹${Number(starBonusPoints).toFixed(2)})`,
+              body: `Awesome Dora! Completed all ${totalActive} routine slots today!`,
+              targetRole: 'user',
+              data: { type: 'star_bonus_awarded' }
+            });
+          }
+        }
+      }
+
       io.emit('daily_task_submission_updated', {
         submission: updatedSubmission,
         submissionId: submissionId || (updatedSubmission && updatedSubmission.id),
@@ -3302,6 +3358,26 @@ io.on('connection', (socket) => {
         }
       }
 
+      // If all-slots star bonus was previously awarded for this date, revoke it since a slot was rejected
+      const rejectTargetDate = (updatedSubmission && updatedSubmission.date) || getISTDateString();
+      const rejectStarBonusId = `lb_daily_star_bonus_${rejectTargetDate}`;
+      if ((globalLoveBalanceState.loveLedger || []).some(e => e && e.id === rejectStarBonusId)) {
+        globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(e => e && e.id !== rejectStarBonusId);
+        globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
+        globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
+        persistLoveState();
+        syncActiveDoraUserBalance();
+        broadcastUsersDirectory();
+        io.emit('love_balance_broadcast', {
+          action: 'DELETE_TRANSACTION',
+          transactionId: rejectStarBonusId,
+          loveLedger: globalLoveBalanceState.loveLedger,
+          currentLoveBalance: globalLoveBalanceState.loveBalance,
+          currentAdminLoveBalance: globalLoveBalanceState.adminLoveBalance,
+          serverTimestamp: Date.now()
+        });
+      }
+
       io.emit('daily_task_submission_updated', {
         submission: updatedSubmission,
         rejected: true
@@ -3336,8 +3412,10 @@ io.on('connection', (socket) => {
 
       // Remove approval transaction from loveLedger
       const apprId = approvalId || ('lb_appr_' + (submissionId || `${date}_${slotId}`));
+      const delTargetDate = date || getISTDateString();
+      const delStarBonusId = `lb_daily_star_bonus_${delTargetDate}`;
       globalLoveBalanceState.loveLedger = (globalLoveBalanceState.loveLedger || []).filter(e => 
-        e && e.id !== apprId && !(slotId && e.id && e.id.includes(slotId))
+        e && e.id !== apprId && e.id !== delStarBonusId && !(slotId && e.id && e.id.includes(slotId))
       );
       globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
