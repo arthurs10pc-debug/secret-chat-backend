@@ -2001,6 +2001,16 @@ const globalCoupleGamesState = {
     winner: null,
     lastActionAt: Date.now()
   },
+  snakes: {
+    players: { H: { position: 0 }, A: { position: 0 } },
+    turn: 'H',
+    dice: 1,
+    statusMsg: 'Game ready! Darsh rolls first.',
+    scores: { H: 0, A: 0 },
+    betAmount: 2.0,
+    winner: null,
+    lastActionAt: Date.now()
+  },
   activeChallenge: null
 };
 
@@ -2410,14 +2420,19 @@ io.on('connection', (socket) => {
   const handleGameActionInternal = async (gameData) => {
     try {
       if (!gameData) return;
-      const { type, gameId, betAmount, winner, isDraw, board, tokens, turn, dice, statusMsg, scores } = gameData;
-      const targetGame = (gameId === 'ludo' || (!board && tokens)) ? 'ludo' : 'tictactoe';
+      const { type, gameId, betAmount, winner, isDraw, board, tokens, players, turn, dice, statusMsg, scores } = gameData;
+      const targetGame = (gameId === 'snakes' || (gameData && gameData.game === 'snakes'))
+        ? 'snakes'
+        : (gameId === 'ludo' || (!board && tokens))
+        ? 'ludo'
+        : 'tictactoe';
 
       if (!globalCoupleGamesState[targetGame]) {
         globalCoupleGamesState[targetGame] = {};
       }
       if (board) globalCoupleGamesState[targetGame].board = board;
       if (tokens) globalCoupleGamesState[targetGame].tokens = tokens;
+      if (players) globalCoupleGamesState[targetGame].players = players;
       if (turn) globalCoupleGamesState[targetGame].turn = turn;
       if (dice !== undefined) globalCoupleGamesState[targetGame].dice = dice;
       if (statusMsg) globalCoupleGamesState[targetGame].statusMsg = statusMsg;
@@ -2433,6 +2448,12 @@ io.on('connection', (socket) => {
           globalCoupleGamesState.tictactoe.winner = null;
           globalCoupleGamesState.tictactoe.isDraw = false;
           globalCoupleGamesState.tictactoe.gameStatus = 'PLAYING';
+        } else if (targetGame === 'snakes') {
+          globalCoupleGamesState.snakes.players = { H: { position: 0 }, A: { position: 0 } };
+          globalCoupleGamesState.snakes.turn = 'H';
+          globalCoupleGamesState.snakes.dice = 1;
+          globalCoupleGamesState.snakes.winner = null;
+          globalCoupleGamesState.snakes.statusMsg = 'Match reset! Darsh rolls first.';
         } else {
           globalCoupleGamesState.ludo.tokens = { H: [-1, -1, -1, -1], A: [-1, -1, -1, -1] };
           globalCoupleGamesState.ludo.turn = 'H';
@@ -2449,7 +2470,7 @@ io.on('connection', (socket) => {
         const loserTarget = winner === 'H' ? 'user' : 'admin';
         const winnerLabel = winner === 'H' ? 'Darsh' : 'Dora';
         const loserLabel = winner === 'H' ? 'Dora' : 'Darsh';
-        const gameLabel = targetGame === 'ludo' ? 'Ludo Royale' : 'Couple Tic-Tac-Toe';
+        const gameLabel = targetGame === 'snakes' ? 'Snakes & Ladders' : (targetGame === 'ludo' ? 'Ludo Royale' : 'Couple Tic-Tac-Toe');
 
         if (bet > 0) {
           const winEntry = {
@@ -2513,7 +2534,7 @@ io.on('connection', (socket) => {
   socket.on('couple_game_action', handleGameActionInternal);
 
   socket.on('couple_game_get_state', ({ gameId }) => {
-    const targetGame = gameId === 'ludo' ? 'ludo' : 'tictactoe';
+    const targetGame = gameId === 'snakes' ? 'snakes' : (gameId === 'ludo' ? 'ludo' : 'tictactoe');
     socket.emit('couple_game_state_sync', {
       gameId: targetGame,
       state: globalCoupleGamesState[targetGame] || {},
@@ -2528,7 +2549,7 @@ io.on('connection', (socket) => {
     try {
       const isSenderAdmin = inviteData.challengerRole === 'parent' || inviteData.challengerRole === 'admin';
       const targetRole = isSenderAdmin ? 'user' : 'parent';
-      const gameLabel = inviteData.game === 'ludo' ? 'Ludo Royale (2P)' : 'Tic-Tac-Toe';
+      const gameLabel = inviteData.game === 'snakes' ? 'Snakes & Ladders 🐍🪜' : (inviteData.game === 'ludo' ? 'Ludo Royale (2P)' : 'Tic-Tac-Toe');
       const betLabel = inviteData.betAmount ? ` • ₹${inviteData.betAmount} Bet` : '';
       sendWebPushNotification({
         title: `🎲 ${inviteData.challenger} Challenged You!`,
