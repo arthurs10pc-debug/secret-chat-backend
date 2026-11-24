@@ -609,7 +609,9 @@ const globalSyncState = {
   title: null,
   state: 'PAUSE',
   currentTime: 0,
-  lastUpdated: Date.now()
+  lastUpdated: Date.now(),
+  queue: [null, null, null],
+  lastAdvanceTime: 0
 };
 
 function getAccurateSyncTime() {
@@ -2130,9 +2132,13 @@ io.on('connection', (socket) => {
         title: globalSyncState.title,
         state: globalSyncState.state,
         currentTime: getAccurateSyncTime(),
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        queue: globalSyncState.queue || [null, null, null]
       });
     }
+
+    // Always emit current upcoming song queue on connect
+    socket.emit('sync_queue_broadcast', { queue: globalSyncState.queue || [null, null, null] });
 
     if (codexCinemaState.url || codexCinemaState.ytId || codexCinemaState.embedUrl || codexCinemaState.engine === 'local') {
       socket.emit('codex_restore_state', codexCinemaState);
@@ -3245,6 +3251,68 @@ io.on('connection', (socket) => {
     globalSyncState.currentTime = 0;
     globalSyncState.lastUpdated = Date.now();
     io.emit('sync_track_update', { videoId, title });
+  });
+
+  socket.on('sync_queue_update', ({ queue }) => {
+    if (Array.isArray(queue)) {
+      globalSyncState.queue = [
+        queue[0] || null,
+        queue[1] || null,
+        queue[2] || null
+      ];
+      io.emit('sync_queue_broadcast', { queue: globalSyncState.queue });
+    }
+  });
+
+  socket.on('sync_track_ended', () => {
+    if (Date.now() - (globalSyncState.lastAdvanceTime || 0) < 3000) return;
+    globalSyncState.lastAdvanceTime = Date.now();
+
+    const currentQueue = Array.isArray(globalSyncState.queue) ? globalSyncState.queue : [null, null, null];
+    if (currentQueue[0]) {
+      const nextSong = currentQueue[0];
+      const newQueue = [
+        currentQueue[1] || null,
+        currentQueue[2] || null,
+        null
+      ];
+      globalSyncState.queue = newQueue;
+      globalSyncState.connected = true;
+      globalSyncState.videoId = nextSong.videoId;
+      globalSyncState.title = nextSong.title || nextSong.url || 'YouTube Track';
+      globalSyncState.state = 'PLAY';
+      globalSyncState.currentTime = 0;
+      globalSyncState.lastUpdated = Date.now();
+
+      io.emit('sync_track_update', { videoId: nextSong.videoId, title: globalSyncState.title });
+      io.emit('sync_queue_broadcast', { queue: newQueue });
+    } else {
+      globalSyncState.state = 'PAUSE';
+      io.emit('sync_playback_update', { state: 'PAUSE', currentTime: 0, timestamp: Date.now() });
+    }
+  });
+
+  socket.on('sync_play_scheduled_slot', ({ index }) => {
+    const currentQueue = Array.isArray(globalSyncState.queue) ? globalSyncState.queue : [null, null, null];
+    const targetSong = currentQueue[index];
+    if (targetSong) {
+      const filtered = currentQueue.filter((_, idx) => idx !== index);
+      const newQueue = [
+        filtered[0] || null,
+        filtered[1] || null,
+        null
+      ];
+      globalSyncState.queue = newQueue;
+      globalSyncState.connected = true;
+      globalSyncState.videoId = targetSong.videoId;
+      globalSyncState.title = targetSong.title || targetSong.url || 'YouTube Track';
+      globalSyncState.state = 'PLAY';
+      globalSyncState.currentTime = 0;
+      globalSyncState.lastUpdated = Date.now();
+
+      io.emit('sync_track_update', { videoId: targetSong.videoId, title: globalSyncState.title });
+      io.emit('sync_queue_broadcast', { queue: newQueue });
+    }
   });
 
   socket.on('sync_playback_state', ({ state, currentTime, timestamp }) => {
