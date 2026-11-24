@@ -2367,6 +2367,12 @@ io.on('connection', (socket) => {
     io.emit('couple_game_invite_broadcast', inviteData);
   });
 
+  socket.on('couple_game_accept', (data) => {
+    globalCoupleGamesState.activeChallenge = null;
+    io.emit('couple_game_invite_clear');
+    io.emit('launch_game_session', data);
+  });
+
   socket.on('couple_game_invite_clear', () => {
     globalCoupleGamesState.activeChallenge = null;
     io.emit('couple_game_invite_clear');
