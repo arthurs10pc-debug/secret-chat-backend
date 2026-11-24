@@ -123,15 +123,6 @@ function syncBalancesFromLedger() {
     globalLoveBalanceState.loveLedger = [];
   }
 
-  // Also remove any accidental scratch card debit mistakenly recorded on Dora
-  globalLoveBalanceState.loveLedger = globalLoveBalanceState.loveLedger.filter(e => {
-    if (!e) return false;
-    if (e.target === 'user' && typeof e.description === 'string' && e.description.includes('Opened Surprise Scratch Card')) {
-      return false;
-    }
-    return true;
-  });
-
   globalLoveBalanceState.loveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'user');
   globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
 }
