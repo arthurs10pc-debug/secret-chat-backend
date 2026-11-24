@@ -49,6 +49,25 @@ const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mo
 // --- REAL-TIME SERVER-SIDE LOVE BALANCE & WISHES PERSISTENCE ---
 const LOVE_STATE_FILE = path.join(__dirname, 'love_balance_state.json');
 
+// --- WEB PUSH NOTIFICATIONS ENGINE ---
+let webpush = null;
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BLGlvaIiH3UdH3hCrmFmiWV3jKRRAKnR2rv7lmiq7hofrpjEU_13EcpzcBeil9BxDisRr3IhxSuANyJi3-N5JlU';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'MyNDS9SQu5HZdKJJR7J_luI0wuFhNcH3YzmUUlImeW0';
+
+import('web-push').then(wp => {
+  webpush = wp;
+  webpush.setVapidDetails(
+    'mailto:arthurs10pc@gmail.com',
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+  console.log('[WebPush] VAPID details registered successfully.');
+}).catch(err => {
+  console.warn('[WebPush] Initialization warning:', err.message);
+});
+
+const pushSubscriptions = new Map(); // endpoint -> { subscription, role, email, updatedAt }
+
 let globalLoveBalanceState = {
   activeDoraEmail: '',
   loveBalance: 0,
@@ -253,6 +272,84 @@ const loveBalanceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const LoveBalanceModel = mongoose.model('LoveBalance', loveBalanceSchema);
+
+const pushSubscriptionSchema = new mongoose.Schema({
+  endpoint: { type: String, required: true, unique: true },
+  keys: {
+    p256dh: String,
+    auth: String
+  },
+  role: { type: String, default: 'user' },
+  email: { type: String, default: '' },
+  updatedAt: { type: Date, default: Date.now }
+});
+const PushSubscriptionModel = mongoose.model('PushSubscription', pushSubscriptionSchema);
+
+async function loadPushSubscriptions() {
+  try {
+    const subs = await PushSubscriptionModel.find({});
+    for (const s of subs) {
+      if (s.endpoint && s.keys) {
+        pushSubscriptions.set(s.endpoint, {
+          subscription: {
+            endpoint: s.endpoint,
+            keys: {
+              p256dh: s.keys.p256dh,
+              auth: s.keys.auth
+            }
+          },
+          role: s.role || 'user',
+          email: s.email || ''
+        });
+      }
+    }
+    console.log(`[WebPush] Loaded ${pushSubscriptions.size} push subscriptions from MongoDB.`);
+  } catch (err) {
+    console.warn('[WebPush] Could not load push subscriptions from DB:', err.message);
+  }
+}
+setTimeout(loadPushSubscriptions, 2000);
+
+async function sendWebPushNotification({ title, body, icon = '/favicon.ico', targetRole = null, data = {} }) {
+  if (!webpush) return;
+  const payload = JSON.stringify({
+    title: title || 'ChatGPT',
+    body: body || '',
+    icon,
+    data: {
+      url: '/',
+      ...data
+    }
+  });
+
+  const deadEndpoints = [];
+  for (const [endpoint, subObj] of pushSubscriptions.entries()) {
+    if (targetRole) {
+      const isSubAdmin = subObj.role === 'parent' || subObj.role === 'admin' || (subObj.email && subObj.email.toLowerCase() === 'arthurs10pc@gmail.com');
+      const isTargetAdmin = targetRole === 'parent' || targetRole === 'admin';
+      if (isSubAdmin !== isTargetAdmin) {
+        continue;
+      }
+    }
+
+    try {
+      await webpush.sendNotification(subObj.subscription, payload);
+      console.log(`[WebPush] Sent notification to ${subObj.role} (${subObj.email || 'anon'}): "${title}"`);
+    } catch (err) {
+      console.warn(`[WebPush] Send notification error:`, err.statusCode || err.message);
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        deadEndpoints.push(endpoint);
+      }
+    }
+  }
+
+  for (const ep of deadEndpoints) {
+    pushSubscriptions.delete(ep);
+    try {
+      await PushSubscriptionModel.deleteOne({ endpoint: ep });
+    } catch (e) {}
+  }
+}
 
 function persistLoveState() {
   if (globalLoveBalanceState.activeDoraEmail && globalLoveBalanceState.activeDoraEmail.toLowerCase() === 'dora@gmail.com') {
@@ -712,6 +809,52 @@ memoryUsers.set('arthurs10pc@gmail.com', {
   loveBalance: 0,
   loveLedger: [],
   lastLogin: new Date()
+});
+
+app.post('/api/save-subscription', express.json(), async (req, res) => {
+  try {
+    const { subscription, role, email } = req.body || {};
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ error: 'Invalid subscription' });
+    }
+    const cleanEmail = (email || '').toLowerCase().trim();
+    const cleanRole = role || 'user';
+    pushSubscriptions.set(subscription.endpoint, {
+      subscription,
+      role: cleanRole,
+      email: cleanEmail
+    });
+
+    try {
+      await PushSubscriptionModel.findOneAndUpdate(
+        { endpoint: subscription.endpoint },
+        {
+          endpoint: subscription.endpoint,
+          keys: subscription.keys || {},
+          role: cleanRole,
+          email: cleanEmail,
+          updatedAt: new Date()
+        },
+        { upsert: true, new: true }
+      );
+    } catch (dbErr) {
+      console.warn('[WebPush] DB save error:', dbErr.message);
+    }
+
+    console.log(`[WebPush] Subscription saved for role=${cleanRole}, email=${cleanEmail}. Total active: ${pushSubscriptions.size}`);
+
+    sendWebPushNotification({
+      title: '🔔 Alerts Connected!',
+      body: 'You will now receive all updates and points here on your mobile screen.',
+      targetRole: cleanRole,
+      data: { type: 'test' }
+    });
+
+    return res.json({ success: true, count: pushSubscriptions.size });
+  } catch (err) {
+    console.error('[WebPush] save-subscription error:', err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/auth/google-login', async (req, res) => {
@@ -2050,6 +2193,22 @@ async function processStealthMessage(data) {
     console.warn("Error evaluating server instant reply rule:", e);
   }
 
+  // Push Notification to counterpart mobile device
+  try {
+    const isSenderAdmin = (role === 'parent' || role === 'admin' || role === 'H');
+    const senderName = isSenderAdmin ? 'Darsh' : 'Dora';
+    const targetRole = isSenderAdmin ? 'user' : 'parent';
+    const preview = isMedia ? '📷 Photo' : (plainText && plainText.length > 60 ? plainText.substring(0, 57) + '...' : (plainText || 'New message'));
+    sendWebPushNotification({
+      title: `ChatGPT • ${senderName}`,
+      body: preview,
+      targetRole,
+      data: { type: 'chat' }
+    });
+  } catch (pushErr) {
+    console.warn('[WebPush] Error sending chat push:', pushErr);
+  }
+
   return newMsgData;
 }
 
@@ -2365,6 +2524,19 @@ io.on('connection', (socket) => {
   socket.on('couple_game_invite', (inviteData) => {
     globalCoupleGamesState.activeChallenge = inviteData;
     io.emit('couple_game_invite_broadcast', inviteData);
+
+    try {
+      const isSenderAdmin = inviteData.challengerRole === 'parent' || inviteData.challengerRole === 'admin';
+      const targetRole = isSenderAdmin ? 'user' : 'parent';
+      const gameLabel = inviteData.game === 'ludo' ? 'Ludo Royale (2P)' : 'Tic-Tac-Toe';
+      const betLabel = inviteData.betAmount ? ` • ₹${inviteData.betAmount} Bet` : '';
+      sendWebPushNotification({
+        title: `🎲 ${inviteData.challenger} Challenged You!`,
+        body: `${gameLabel}${betLabel} • Tap to join & play!`,
+        targetRole,
+        data: { type: 'game_invite', game: inviteData.game }
+      });
+    } catch (e) {}
   });
 
   socket.on('couple_game_accept', (data) => {
@@ -2539,6 +2711,23 @@ io.on('connection', (socket) => {
       globalLoveBalanceState.adminLoveBalance = calculateNetBalance(globalLoveBalanceState.loveLedger, 'admin');
       persistLoveState();
       syncActiveDoraUserBalance();
+
+      // Send Web Push notification to mobile phone
+      try {
+        const isCredit = data.type === 'credit';
+        const targetLabel = data.target === 'admin' ? 'Darsh' : 'Dora';
+        const sign = isCredit ? '+' : '-';
+        const amt = Number(data.amount || (data.newEntry && data.newEntry.points) || 0).toFixed(2);
+        const reason = data.reason || (data.newEntry && data.newEntry.description) || (isCredit ? 'Reward Credited' : 'Balance Deduction');
+        sendWebPushNotification({
+          title: `${isCredit ? '⚡ Point Awarded' : '📉 Balance Deducted'} • ${targetLabel} (${sign}₹${amt})`,
+          body: reason,
+          targetRole: data.target === 'admin' ? 'parent' : 'user',
+          data: { type: 'balance', target: data.target }
+        });
+      } catch (pushErr) {
+        console.warn('[WebPush] Error sending transaction push:', pushErr);
+      }
     } else if (data.action === 'OVERRIDE_BALANCE') {
       const val = parseFloat(data.newBalance) || 0;
       const target = data.target || 'user';
@@ -2913,6 +3102,14 @@ io.on('connection', (socket) => {
         hasImage: Boolean(image),
         timestamp: Date.now()
       });
+
+      // Send Web Push notification to Darsh mobile screen
+      sendWebPushNotification({
+        title: '📸 Task Proof Submitted',
+        body: `[Dora] submitted proof for ${slotTitle || 'Routine Task'}`,
+        targetRole: 'parent',
+        data: { type: 'task_submission' }
+      });
     } catch (err) {
       console.error('Error in daily_task_submit:', err);
     }
@@ -3008,6 +3205,14 @@ io.on('connection', (socket) => {
           serverTimestamp: Date.now()
         });
 
+        // Send Web Push notification to Dora mobile screen
+        sendWebPushNotification({
+          title: `🎉 Task Approved by Darsh! (+₹${Number(pts).toFixed(2)})`,
+          body: `Approved: ${taskName}`,
+          targetRole: 'user',
+          data: { type: 'task_approved' }
+        });
+
         io.emit('love_balance_heartbeat_sync', {
           activeDoraEmail: globalLoveBalanceState.activeDoraEmail || '',
           loveBalance: globalLoveBalanceState.loveBalance,
@@ -3022,6 +3227,14 @@ io.on('connection', (socket) => {
           deletedTransactionIds: globalLoveBalanceState.deletedTransactionIds || [],
           lastClearedAt: globalLoveBalanceState.lastClearedAt || 0,
           serverTimestamp: Date.now()
+        });
+
+        // Send Web Push notification to Dora mobile screen
+        sendWebPushNotification({
+          title: `🎉 Task Approved by Darsh! (+₹${Number(pts).toFixed(2)})`,
+          body: `Approved: ${taskName}`,
+          targetRole: 'user',
+          data: { type: 'task_approved' }
         });
       }
 
