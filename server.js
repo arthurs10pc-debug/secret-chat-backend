@@ -604,7 +604,7 @@ async function seedDefaultSlotsIfEmpty() {
 seedDefaultSlotsIfEmpty();
 
 const globalSyncState = {
-  connected: false,
+  connected: true,
   videoId: null,
   title: null,
   state: 'PAUSE',
@@ -2125,17 +2125,15 @@ io.on('connection', (socket) => {
       console.error("Error loading chat history:", error);
     }
 
-    if (globalSyncState.connected && globalSyncState.videoId) {
-      socket.emit('sync_restore_state', {
-        connected: true,
-        videoId: globalSyncState.videoId,
-        title: globalSyncState.title,
-        state: globalSyncState.state,
-        currentTime: getAccurateSyncTime(),
-        timestamp: Date.now(),
-        queue: globalSyncState.queue || [null, null, null]
-      });
-    }
+    socket.emit('sync_restore_state', {
+      connected: true,
+      videoId: globalSyncState.videoId || '',
+      title: globalSyncState.title || '',
+      state: globalSyncState.state || 'PAUSE',
+      currentTime: getAccurateSyncTime(),
+      timestamp: Date.now(),
+      queue: globalSyncState.queue || [null, null, null]
+    });
 
     // Always emit current upcoming song queue on connect
     socket.emit('sync_queue_broadcast', { queue: globalSyncState.queue || [null, null, null] });
