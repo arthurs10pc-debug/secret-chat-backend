@@ -701,7 +701,7 @@ async function seedDefaultSlotsIfEmpty() {
 seedDefaultSlotsIfEmpty();
 
 const globalSyncState = {
-  connected: true,
+  connected: false,
   videoId: null,
   title: null,
   state: 'PAUSE',
@@ -2285,7 +2285,7 @@ io.on('connection', (socket) => {
     }
 
     socket.emit('sync_restore_state', {
-      connected: true,
+      connected: Boolean(globalSyncState.connected),
       videoId: globalSyncState.videoId || '',
       title: globalSyncState.title || '',
       state: globalSyncState.state || 'PAUSE',
@@ -3439,6 +3439,17 @@ io.on('connection', (socket) => {
 
   socket.on('sync_send_invite', ({ role }) => {
     socket.broadcast.emit('sync_receive_invite', { fromRole: role });
+    try {
+      const isSenderAdmin = role === 'parent' || role === 'admin';
+      const targetRole = isSenderAdmin ? 'user' : 'parent';
+      const senderName = isSenderAdmin ? 'Admin' : 'Dora';
+      sendWebPushNotification({
+        title: `🎵 ${senderName} Synced Music Lounge`,
+        body: `Invitation sent! Tap to connect and listen together in real-time.`,
+        targetRole,
+        data: { type: 'music_sync_invite' }
+      });
+    } catch (e) {}
   });
 
   socket.on('sync_confirm_invite', () => {
