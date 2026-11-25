@@ -1618,12 +1618,20 @@ function evaluateRoutineAndHabitInfractions() {
       let h = parseInt(timePart.slice(0, colonIdx), 10);
       let m = parseInt(timePart.slice(colonIdx + 1, colonIdx + 3) || '0', 10);
       if (isNaN(h)) return null;
-      const tag = (slot.tag || '').toLowerCase();
-      // PM slots in daily routine (Lunch, Water, Tea, Dinner, Steps, Skincare)
-      if (['lunch', 'water', 'tea', 'dinner', 'steps', 'skincare'].includes(tag) && h < 12) {
+
+      const isPm = /pm/i.test(timeRange) || /pm/i.test(timePart);
+      const isAm = /am/i.test(timeRange) || /am/i.test(timePart);
+      if (isPm && h < 12) {
         h += 12;
-      } else if (h >= 1 && h <= 7) {
-        h += 12; // 01:00 PM to 07:00 PM
+      } else if (isAm && h === 12) {
+        h = 0;
+      } else if (!isPm && !isAm) {
+        const lower = ((slot.tag || '') + ' ' + (slot.title || '')).toLowerCase();
+        if (['lunch', 'water', 'tea', 'dinner', 'steps', 'skincare', 'night', 'sleep', 'evening'].some(k => lower.includes(k)) && h < 12) {
+          h += 12;
+        } else if (h >= 1 && h <= 7) {
+          h += 12; // 01:00 PM to 07:00 PM
+        }
       }
       return h * 60 + (isNaN(m) ? 0 : m);
     };
@@ -1797,7 +1805,20 @@ function evaluateRoutineAndHabitInfractions() {
       // 3. DAILY ROUTINE TASKS (AUTOMATIC MISSED SLOT DEDUCTIONS)
       activeSlots.forEach(slot => {
         const slotEndMinutes = parseSlotEndMinutes(slot);
-        const isOverdue = isPastDay || (isToday && slotEndMinutes !== null && currentMinutes > slotEndMinutes);
+        const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
+
+        // If today and the slot is still upcoming/in progress, REMOVE any premature debit penalty!
+        if (isToday && slotEndMinutes !== null && currentMinutes <= slotEndMinutes) {
+          const prematureDebitIdx = (globalLoveBalanceState.loveLedger || []).findIndex(e => e && e.id === slotTxId && e.type === 'debit');
+          if (prematureDebitIdx >= 0) {
+            globalLoveBalanceState.loveLedger.splice(prematureDebitIdx, 1);
+            ledgerChanged = true;
+          }
+          return;
+        }
+
+        // Only evaluate overdue for TODAY when deadline has actually passed
+        const isOverdue = isToday && slotEndMinutes !== null && currentMinutes > slotEndMinutes;
         if (!isOverdue) return;
 
         // If the slot deadline expired before or at the clear timestamp, DO NOT deduct!
