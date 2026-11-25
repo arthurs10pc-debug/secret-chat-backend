@@ -1831,7 +1831,6 @@ function evaluateRoutineAndHabitInfractions() {
           }
         }
 
-        const slotTxId = `habit_routine_${slot.id}_${dayStr}_user`;
         const sub = (memoryDailySubmissions || []).find(s => s && s.slotId === slot.id && s.date === dayStr);
 
         if (sub && sub.status === 'APPROVED') {
